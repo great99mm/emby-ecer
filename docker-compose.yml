@@ -1,0 +1,29 @@
+services:
+  emby-ecer:
+    build: .
+    image: emby-ecer:latest
+    container_name: emby-ecer
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - app-data:/data
+    environment:
+      PORT: "${PORT:-3000}"
+      CONFIG_PATH: "${CONFIG_PATH:-/data/config.json}"
+      APP_USERS: "${APP_USERS:-admin:admin123}"
+      APP_JWT_SECRET: "${APP_JWT_SECRET:-please-change-to-a-long-random-string}"
+      APP_TOKEN_TTL_SECONDS: "${APP_TOKEN_TTL_SECONDS:-86400}"
+      EMBY_URL: "${EMBY_URL:-}"
+      EMBY_API_KEY: "${EMBY_API_KEY:-}"
+      EMBY_USER_ID: "${EMBY_USER_ID:-}"
+      TMDB_API_KEY: "${TMDB_API_KEY:-}"
+      PANSOU_URL: "${PANSOU_URL:-https://so.252035.xyz}"
+      PANSOU_USERNAME: "${PANSOU_USERNAME:-}"
+      PANSOU_PASSWORD: "${PANSOU_PASSWORD:-}"
+      PANSOU_TOKEN: "${PANSOU_TOKEN:-}"
+      P115_COOKIE: "${P115_COOKIE:-}"
+      P115_TARGET_CID: "${P115_TARGET_CID:-0}"
+
+volumes:
+  app-data:
