@@ -41,7 +41,7 @@ function Input({ name, label, value, onChange, type = 'text', placeholder = '' }
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="w-full rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+        className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
       />
     </label>
   );
@@ -57,7 +57,7 @@ function Textarea({ name, label, value, onChange, placeholder = '' }) {
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="w-full rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
+        className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
       />
     </label>
   );

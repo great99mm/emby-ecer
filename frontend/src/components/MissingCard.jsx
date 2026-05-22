@@ -101,7 +101,7 @@ export default function MissingCard({ group }) {
   // Poster Card
   return (
     <>
-      <div onClick={() => setOpen(true)} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow">
+      <div onClick={() => setOpen(true)} className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow">
         <div className="relative aspect-[2/3] bg-gray-100">
           {group.posterPath ? (
             <img src={TMDB_IMG + group.posterPath} className="w-full h-full object-cover" loading="lazy" alt="" />
@@ -134,12 +134,12 @@ export default function MissingCard({ group }) {
       {open && (
         <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 px-4 pb-8 overflow-y-auto" onClick={() => setOpen(false)}>
           <div className="fixed inset-0 bg-black/40" />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg my-auto" onClick={e => e.stopPropagation()}>
+          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-lg my-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-start gap-3 p-4 border-b border-gray-100">
               {group.posterPath ? (
-                <img src={TMDB_IMG + group.posterPath} className="w-14 h-[83px] rounded-lg object-cover shrink-0 bg-gray-100" alt="" />
+                <img src={TMDB_IMG + group.posterPath} className="w-14 h-[83px] rounded object-cover shrink-0 bg-gray-100" alt="" />
               ) : (
-                <div className="w-14 h-[83px] rounded-lg bg-gray-100 shrink-0 flex items-center justify-center text-xl">🎬</div>
+                <div className="w-14 h-[83px] rounded bg-gray-100 shrink-0 flex items-center justify-center text-xl">🎬</div>
               )}
               <div className="min-w-0 flex-1">
                 <h2 className="text-base font-bold text-gray-900">{group.title}</h2>
@@ -150,13 +150,13 @@ export default function MissingCard({ group }) {
                 </div>
                 <p className="text-xs text-gray-500 mt-1">缺失集号：{codes}</p>
               </div>
-              <button onClick={() => setOpen(false)} className="shrink-0 p-1 rounded-lg hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
+              <button onClick={() => setOpen(false)} className="shrink-0 p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
             </div>
             <div className="px-4 py-3 grid grid-cols-2 gap-2">
-              <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-lg border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
+              <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
                 <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP中' : 'MP搜索'}
               </button>
-              <button type="button" onClick={doSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-lg bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
+              <button type="button" onClick={doSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-md bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
                 <Search className="w-4 h-4" /> {search?.loading ? '盘搜中' : '盘搜搜索'}
               </button>
             </div>
@@ -167,7 +167,7 @@ export default function MissingCard({ group }) {
                 </div>
               )}
               {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
-              {search?.mpError && <div className="rounded-lg bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
+              {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
 
               {/* MP 结果统计 */}
               {!search?.mpLoading && search?.mpResults !== undefined && (
@@ -188,7 +188,7 @@ export default function MissingCard({ group }) {
                   {matchedMP.map((r, i) => {
                     const mt = matchType(r);
                     return (
-                    <div key={'mmp'+i} className="rounded-lg p-2.5 border border-emerald-200 bg-emerald-50/30 mb-1.5">
+                    <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30 mb-1.5">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium text-gray-800">
@@ -209,7 +209,7 @@ export default function MissingCard({ group }) {
                 (matchedMP.length === 0) ? (
                   <div className="mt-1 space-y-1.5">
                     {unmatchedMP.map((r, i) => (
-                      <div key={'ump'+i} className="rounded-lg p-2 border border-gray-100 bg-gray-50">
+                      <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
                           <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
@@ -222,7 +222,7 @@ export default function MissingCard({ group }) {
                     <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">MP未匹配 · {unmatchedMP.length}条</summary>
                     <div className="mt-1 space-y-1.5">
                       {unmatchedMP.map((r, i) => (
-                        <div key={'ump'+i} className="rounded-lg p-2 border border-gray-100 bg-gray-50">
+                        <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
                             <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>

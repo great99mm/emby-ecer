@@ -9,7 +9,7 @@ export default function SearchResults({ search }) {
 
   if (!search) return null;
   if (search.loading) return <p className="text-sm text-gray-400 py-3 text-center">搜索中...</p>;
-  if (search.error) return <p className="text-sm font-semibold text-red-500 bg-red-50 rounded-lg p-3 mt-2">{search.error}</p>;
+  if (search.error) return <p className="text-sm font-semibold text-red-500 bg-red-50 rounded-md p-3 mt-2">{search.error}</p>;
   if (!search.results?.length) return search.results ? <p className="text-sm text-gray-400 py-3 text-center">没有搜到 115 资源</p> : null;
 
   const codes = (search.codes || '').split('、').filter(Boolean);
@@ -82,7 +82,7 @@ export default function SearchResults({ search }) {
         const t = transfers[key];
 
         return (
-          <div key={index} className={`rounded-lg bg-gray-50 p-3 border ${matched ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-100'}`}>
+          <div key={index} className={`rounded-md bg-gray-50 p-3 border ${matched ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-100'}`}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-bold text-gray-900 leading-snug">
@@ -100,7 +100,7 @@ export default function SearchResults({ search }) {
                 <button
                   onClick={() => doTransfer(result, index)}
                   disabled={t?.loading}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 transition-colors disabled:opacity-50"
+                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 transition-colors disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   {t?.loading ? '转存中' : '转存'}

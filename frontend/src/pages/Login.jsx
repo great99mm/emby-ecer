@@ -47,7 +47,7 @@ export default function Login() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary-600 text-white mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-lg bg-primary-600 text-white mb-4">
             <Clapperboard className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-extrabold text-gray-900">Emby 补片助手</h1>
@@ -62,7 +62,7 @@ export default function Login() {
               onChange={e => setUsername(e.target.value)}
               placeholder="请输入用户名"
               autoFocus
-              className="w-full rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
             />
           </div>
           <div>
@@ -72,7 +72,7 @@ export default function Login() {
               value={password}
               onChange={e => setPassword(e.target.value)}
               placeholder="请输入密码"
-              className="w-full rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
             />
           </div>
           <button
