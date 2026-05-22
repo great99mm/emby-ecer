@@ -22,8 +22,10 @@ function JobPoller() {
       try {
         const j = await api(`/api/jobs/${activeJobId}`);
         setJobStatus(j);
+        if (j.result?.scan) {
+          setScan(j.result.scan);
+        }
         if (j.status === 'done' && j.result) {
-          if (j.result.scan) setScan(j.result.scan);
           if (j.result.searched) applySearchResults(j.result.searched);
           clearJob();
         } else if (j.status === 'error') {

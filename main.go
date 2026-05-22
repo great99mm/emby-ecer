@@ -32,7 +32,7 @@ var (
 	jwtSecret  []byte
 	store      *settingsStore
 	tmdbCache  *tmdbCacheStore
-	httpCli   = &http.Client{Timeout: 45 * time.Second}
+	httpCli    = &http.Client{Timeout: 45 * time.Second}
 
 	pansouToken = struct {
 		sync.Mutex
@@ -46,10 +46,10 @@ var (
 type jobStatus string
 
 const (
-	jobPending  jobStatus = "pending"
-	jobRunning  jobStatus = "running"
-	jobDone     jobStatus = "done"
-	jobError    jobStatus = "error"
+	jobPending jobStatus = "pending"
+	jobRunning jobStatus = "running"
+	jobDone    jobStatus = "done"
+	jobError   jobStatus = "error"
 )
 
 type job struct {
@@ -271,7 +271,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
-		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries)
+		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
 			return
@@ -456,11 +456,11 @@ func maskSettings(s settings) map[string]any {
 		"mpUrl":          s.MPUrl,
 		"mpToken":        maskSecret(s.MPToken, 4),
 		"ready": map[string]bool{
-			"emby": s.EmbyURL != "" && s.EmbyAPIKey != "",
-			"tmdb": s.TMDBAPIKey != "",
+			"emby":   s.EmbyURL != "" && s.EmbyAPIKey != "",
+			"tmdb":   s.TMDBAPIKey != "",
 			"pansou": s.PansouURL != "",
-			"p115":  s.P115Cookie != "",
-			"mp":    s.MPUrl != "" && s.MPToken != "",
+			"p115":   s.P115Cookie != "",
+			"mp":     s.MPUrl != "" && s.MPToken != "",
 		},
 	}
 }
@@ -835,61 +835,50 @@ type unmatchedMedia struct {
 	Reason      string            `json:"reason"`
 }
 
-func scanLibrary(s settings, airedOnly bool, maxSeries int) (map[string]any, error) {
+func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(processed, total int, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
 	}
 
 	itemRoute := embyItemsRoute(s)
-	var itemsResp embyItemsResp
-	if err := embyGet(s, itemRoute, map[string]string{
-		"Recursive":        "true",
-		"IncludeItemTypes": "Series,Movie",
-		"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,Path",
-		"SortBy":           "SortName",
-	}, &itemsResp); err != nil {
-		return nil, err
-	}
-
 	seriesItems := make([]embyItem, 0)
 	movieItems := make([]embyItem, 0)
-	for _, item := range itemsResp.Items {
-		switch item.Type {
-		case "Series":
-			seriesItems = append(seriesItems, item)
-		case "Movie":
-			movieItems = append(movieItems, item)
+	seriesTotal := 0
+	movieTotal := 0
+
+	itemStart := 0
+	itemPageLimit := 1000
+	for {
+		var page embyItemsResp
+		if err := embyGet(s, itemRoute, map[string]string{
+			"Recursive":        "true",
+			"IncludeItemTypes": "Series,Movie",
+			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,Path",
+			"SortBy":           "SortName",
+			"StartIndex":       strconv.Itoa(itemStart),
+			"Limit":            strconv.Itoa(itemPageLimit),
+		}, &page); err != nil {
+			return nil, err
 		}
+
+		for _, item := range page.Items {
+			switch item.Type {
+			case "Series":
+				seriesTotal++
+				seriesItems = append(seriesItems, item)
+			case "Movie":
+				movieTotal++
+				movieItems = append(movieItems, item)
+			}
+		}
+
+		if len(page.Items) < itemPageLimit {
+			break
+		}
+		itemStart += itemPageLimit
 	}
 	if maxSeries > 0 && maxSeries < len(seriesItems) {
 		seriesItems = seriesItems[:maxSeries]
-	}
-
-	episodesBySeries := make(map[string][]embyEpisode, len(seriesItems))
-	startIndex := 0
-	pageLimit := 10000
-	for {
-		var page embyEpisodesResp
-		if err := embyGet(s, itemRoute, map[string]string{
-			"Recursive":        "true",
-			"IncludeItemTypes": "Episode",
-			"Fields":           "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
-			"SortBy":           "SeriesName,ParentIndexNumber,IndexNumber",
-			"StartIndex":       strconv.Itoa(startIndex),
-			"Limit":            strconv.Itoa(pageLimit),
-		}, &page); err != nil {
-			return nil, fmt.Errorf("读取 Emby 全部剧集集数失败：%w", err)
-		}
-		for _, ep := range page.Items {
-			if ep.SeriesID == "" || !isActualEmbyEpisode(ep) {
-				continue
-			}
-			episodesBySeries[ep.SeriesID] = append(episodesBySeries[ep.SeriesID], ep)
-		}
-		if len(page.Items) < pageLimit {
-			break
-		}
-		startIndex += pageLimit
 	}
 
 	var mu sync.Mutex
@@ -898,20 +887,75 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int) (map[string]any, err
 	unmatchedMovies := make([]unmatchedMedia, 0)
 	matchedSeries := 0
 	matchedMovies := 0
+	seriesDone := 0
+	movieDone := 0
+	totalWork := len(seriesItems) + len(movieItems)
+	if totalWork <= 0 {
+		totalWork = 1
+	}
+	buildSnapshot := func() (int, map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		missingCopy := append([]missingEpisode(nil), missing...)
+		seriesCopy := append([]unmatchedMedia(nil), unmatchedSeries...)
+		movieCopy := append([]unmatchedMedia(nil), unmatchedMovies...)
+		sortMissingEpisodes(missingCopy)
+		processed := seriesDone + movieDone
+		return processed, map[string]any{
+			"scannedAt": time.Now().Format(time.RFC3339),
+			"summary": map[string]any{
+				"seriesTotal":          seriesTotal,
+				"seriesScanned":        len(seriesItems),
+				"movieTotal":           movieTotal,
+				"matchedSeries":        matchedSeries,
+				"unmatchedSeries":      len(unmatchedSeries),
+				"matchedMovies":        matchedMovies,
+				"unmatchedMovies":      len(unmatchedMovies),
+				"totalMissingEpisodes": len(missing),
+				"airedOnly":            airedOnly,
+			},
+			"missing": missingCopy,
+			"unmatched": map[string]any{
+				"series": limitUnmatched(seriesCopy, 80),
+				"movies": limitUnmatched(movieCopy, 80),
+			},
+		}
+	}
+	emitProgress := func() {
+		if onProgress == nil {
+			return
+		}
+		processed, snapshot := buildSnapshot()
+		onProgress(processed, totalWork, snapshot)
+	}
+	emitProgress()
 
 	parallelFor(seriesItems, 6, func(series embyItem) {
 		resolved, err := resolveTmdbTV(s, series)
 		if err != nil || resolved == 0 {
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "找不到 TMDB 剧集 ID"))
+			seriesDone++
 			mu.Unlock()
+			emitProgress()
 			return
 		}
 
 		owned := map[string]bool{}
 		ownedTMDBEpisodes := map[int]bool{}
 		embySeasons := map[int]bool{}
-		for _, ep := range episodesBySeries[series.ID] {
+
+		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID)
+		if err != nil {
+			mu.Lock()
+			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error()))
+			seriesDone++
+			mu.Unlock()
+			emitProgress()
+			return
+		}
+
+		for _, ep := range seriesEpisodes {
 			if ep.ParentIndexNumber > 0 && ep.IndexNumber > 0 {
 				owned[fmt.Sprintf("%d:%d", ep.ParentIndexNumber, ep.IndexNumber)] = true
 			}
@@ -927,7 +971,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int) (map[string]any, err
 		if err := tmdbGet(s, fmt.Sprintf("/tv/%d", resolved), map[string]string{"language": "zh-CN"}, &tv); err != nil {
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 TMDB 剧集失败："+err.Error()))
+			seriesDone++
 			mu.Unlock()
+			emitProgress()
 			return
 		}
 		officialTitle := fallback(tv.Name, series.Name)
@@ -1008,50 +1054,29 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int) (map[string]any, err
 
 		mu.Lock()
 		matchedSeries++
+		seriesDone++
 		missing = append(missing, localMissing...)
 		mu.Unlock()
+		emitProgress()
 	})
 
 	parallelFor(movieItems, 5, func(movie embyItem) {
 		resolved, err := resolveTmdbMovie(s, movie)
 		mu.Lock()
-		defer mu.Unlock()
 		if err != nil || resolved == 0 {
 			unmatchedMovies = append(unmatchedMovies, simpleMedia(movie, "找不到 TMDB 电影 ID"))
+			movieDone++
+			mu.Unlock()
+			emitProgress()
 			return
 		}
 		matchedMovies++
+		movieDone++
+		mu.Unlock()
+		emitProgress()
 	})
-
-	sort.Slice(missing, func(i, j int) bool {
-		if missing[i].OfficialTitle == missing[j].OfficialTitle {
-			if missing[i].Season == missing[j].Season {
-				return missing[i].Episode < missing[j].Episode
-			}
-			return missing[i].Season < missing[j].Season
-		}
-		return missing[i].OfficialTitle < missing[j].OfficialTitle
-	})
-
-	return map[string]any{
-		"scannedAt": time.Now().Format(time.RFC3339),
-		"summary": map[string]any{
-			"seriesTotal":          len(itemsResp.Items) - len(movieItems),
-			"seriesScanned":        len(seriesItems),
-			"movieTotal":           len(movieItems),
-			"matchedSeries":        matchedSeries,
-			"unmatchedSeries":      len(unmatchedSeries),
-			"matchedMovies":        matchedMovies,
-			"unmatchedMovies":      len(unmatchedMovies),
-			"totalMissingEpisodes": len(missing),
-			"airedOnly":            airedOnly,
-		},
-		"missing": missing,
-		"unmatched": map[string]any{
-			"series": limitUnmatched(unmatchedSeries, 80),
-			"movies": limitUnmatched(unmatchedMovies, 80),
-		},
-	}, nil
+	_, result := buildSnapshot()
+	return result, nil
 }
 
 func resolveTmdbTV(s settings, series embyItem) (int, error) {
@@ -1541,7 +1566,7 @@ func transfer115(s settings, body transferRequest) (transferResult, error) {
 
 func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type      string `json:"type"`      // "scan" or "scan-search"
+		Type      string `json:"type"` // "scan" or "scan-search"
 		AiredOnly bool   `json:"airedOnly"`
 		MaxSeries int    `json:"maxSeries"`
 	}
@@ -1587,19 +1612,26 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
-	jobMgr.update(id, func(j *job) { j.Status = jobRunning; j.Message = "开始扫描媒体库..." })
+	jobMgr.update(id, func(j *job) { j.Status = jobRunning; j.Progress = 1; j.Message = "开始扫描媒体库..." })
+
+	scanProgressMax := 95
+	searchProgressBase := 60
+	if typ == "scan-search" {
+		scanProgressMax = 55
+	}
 
 	// 进度条 ticker：扫描期间逐步更新
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(800 * time.Millisecond)
-		p := 0
 		for {
 			select {
 			case <-ticker.C:
-				p += 2
-				if p >= 45 { p = 45 }
-				jobMgr.update(id, func(j *job) { j.Progress = p })
+				jobMgr.update(id, func(j *job) {
+					if j.Status == jobRunning && j.Progress < 8 {
+						j.Progress++
+					}
+				})
 			case <-done:
 				ticker.Stop()
 				return
@@ -1607,22 +1639,59 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 		}
 	}()
 
-	result, err := scanLibrary(s, airedOnly, maxSeries)
+	result, err := scanLibrary(s, airedOnly, maxSeries, func(processed, total int, snapshot map[string]any) {
+		if total <= 0 {
+			total = 1
+		}
+		progress := 5
+		if scanProgressMax > 5 {
+			progress = 5 + (processed*(scanProgressMax-5))/total
+		}
+		if processed >= total {
+			progress = scanProgressMax
+		}
+		missingCount := 0
+		switch items := snapshot["missing"].(type) {
+		case []missingEpisode:
+			missingCount = len(items)
+		case []any:
+			missingCount = len(items)
+		}
+		jobMgr.update(id, func(j *job) {
+			if progress > j.Progress {
+				j.Progress = progress
+			}
+			j.Message = fmt.Sprintf("扫描中 (%d/%d)，已发现 %d 集缺失", processed, total, missingCount)
+			j.Result = map[string]any{"scan": snapshot}
+		})
+	})
 	close(done)
 	if err != nil {
 		jobMgr.update(id, func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
 		return
 	}
 	_ = saveScanResult(result)
+	missingCount := 0
+	switch items := result["missing"].(type) {
+	case []missingEpisode:
+		missingCount = len(items)
+	case []any:
+		missingCount = len(items)
+	}
 
 	jobMgr.update(id, func(j *job) {
-		j.Progress = 50
-		j.Message = "扫描完成，共发现缺失集数"
+		if typ == "scan" {
+			j.Progress = 100
+			j.Status = jobDone
+			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失", missingCount)
+		} else {
+			j.Progress = searchProgressBase
+			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失，开始搜索资源", missingCount)
+		}
 		j.Result = map[string]any{"scan": result}
 	})
 
 	if typ == "scan" {
-		jobMgr.update(id, func(j *job) { j.Status = jobDone; j.Progress = 100; j.Message = "扫描完成" })
 		return
 	}
 
@@ -1664,8 +1733,12 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 	total := len(showOrder)
 	for i, title := range showOrder {
 		grp := showMap[title]
+		progress := searchProgressBase
+		if total > 0 {
+			progress = searchProgressBase + (i*(99-searchProgressBase))/total
+		}
 		jobMgr.update(id, func(j *job) {
-			j.Progress = 50 + (i*50)/total
+			j.Progress = progress
 			j.Message = fmt.Sprintf("搜索中 (%d/%d): %s (缺 %d 集)", i+1, total, title, len(grp.Episodes))
 		})
 
@@ -1761,6 +1834,37 @@ func embyItemsRoute(s settings) string {
 		return "/Users/" + url.PathEscape(s.EmbyUserID) + "/Items"
 	}
 	return "/Items"
+}
+
+func loadSeriesEpisodes(s settings, itemRoute, seriesID string) ([]embyEpisode, error) {
+	startIndex := 0
+	pageLimit := 500
+	items := make([]embyEpisode, 0, 256)
+	for {
+		var page embyEpisodesResp
+		if err := embyGet(s, itemRoute, map[string]string{
+			"Recursive":        "true",
+			"IncludeItemTypes": "Episode",
+			"Fields":           "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
+			"SortBy":           "ParentIndexNumber,IndexNumber",
+			"SeriesIds":        seriesID,
+			"StartIndex":       strconv.Itoa(startIndex),
+			"Limit":            strconv.Itoa(pageLimit),
+		}, &page); err != nil {
+			return nil, err
+		}
+		for _, ep := range page.Items {
+			if ep.SeriesID == "" || !isActualEmbyEpisode(ep) {
+				continue
+			}
+			items = append(items, ep)
+		}
+		if len(page.Items) < pageLimit {
+			break
+		}
+		startIndex += pageLimit
+	}
+	return items, nil
 }
 
 func tmdbGet(s settings, route string, query map[string]string, out any) error {
@@ -2185,6 +2289,18 @@ func limitUnmatched(items []unmatchedMedia, limit int) []unmatchedMedia {
 	return items
 }
 
+func sortMissingEpisodes(items []missingEpisode) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].OfficialTitle == items[j].OfficialTitle {
+			if items[i].Season == items[j].Season {
+				return items[i].Episode < items[j].Episode
+			}
+			return items[i].Season < items[j].Season
+		}
+		return items[i].OfficialTitle < items[j].OfficialTitle
+	})
+}
+
 func parallelFor(items []embyItem, limit int, worker func(embyItem)) {
 	if limit <= 0 {
 		limit = 1
@@ -2365,7 +2481,6 @@ func saveSearchResults(searched any) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-
 func loadSearchResults() ([]any, error) {
 	path := searchResultsPath()
 	raw, err := os.ReadFile(path)
@@ -2408,11 +2523,15 @@ func handleMPSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, kw := range keywords {
 		r, err := mpDoSearch(s, kw, body.TMDBID)
-		if err != nil { errors = append(errors, kw+": "+err.Error()) }
+		if err != nil {
+			errors = append(errors, kw+": "+err.Error())
+		}
 		allResults = append(allResults, r...)
 	}
 	result := map[string]any{"results": allResults}
-	if len(errors) > 0 { result["errors"] = errors }
+	if len(errors) > 0 {
+		result["errors"] = errors
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -2467,7 +2586,9 @@ func mpDoSearch(s settings, keyword string, tmdbID string) ([]map[string]any, er
 		} else if title, ok := item["title"].(string); ok {
 			key = title
 		}
-		if key == "" || seen[key] { continue }
+		if key == "" || seen[key] {
+			continue
+		}
 		seen[key] = true
 		deduped = append(deduped, item)
 	}
@@ -2502,11 +2623,11 @@ func mpParseResults(raw []byte) []map[string]any {
 
 func handleMPDownload(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title       string `json:"title"`
-		TorrentURL  string `json:"torrentUrl"`
-		Magnet      string `json:"magnet"`
-		Description string `json:"description"`
-		TMDBID      string `json:"tmdbId"`
+		Title       string         `json:"title"`
+		TorrentURL  string         `json:"torrentUrl"`
+		Magnet      string         `json:"magnet"`
+		Description string         `json:"description"`
+		TMDBID      string         `json:"tmdbId"`
 		RawData     map[string]any `json:"rawData"`
 	}
 	if err := readJSON(r, &body); err != nil {
@@ -2529,13 +2650,17 @@ func mpDownload(s settings, rawData map[string]any, tmdbID string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	mpURL := s.MPUrl
 	payload := map[string]any{"torrent_in": rawData}
-	if tmdbID != "" { payload["tmdbid"], _ = strconv.Atoi(tmdbID) }
+	if tmdbID != "" {
+		payload["tmdbid"], _ = strconv.Atoi(tmdbID)
+	}
 	raw, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, mpURL+"/api/v1/download/add", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", s.MPToken)
 	resp, err := client.Do(req)
-	if err != nil { return fmt.Errorf("MoviePilot 下载失败：%w", err) }
+	if err != nil {
+		return fmt.Errorf("MoviePilot 下载失败：%w", err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 400 {
