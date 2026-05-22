@@ -1589,7 +1589,26 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 	jobMgr.update(id, func(j *job) { j.Status = jobRunning; j.Message = "开始扫描媒体库..." })
 
+	// 进度条 ticker：扫描期间逐步更新
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(800 * time.Millisecond)
+		p := 0
+		for {
+			select {
+			case <-ticker.C:
+				p += 2
+				if p >= 45 { p = 45 }
+				jobMgr.update(id, func(j *job) { j.Progress = p })
+			case <-done:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+
 	result, err := scanLibrary(s, airedOnly, maxSeries)
+	close(done)
 	if err != nil {
 		jobMgr.update(id, func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
 		return
@@ -2409,12 +2428,15 @@ func mpDoSearch(s settings, keyword string, tmdbID string) ([]map[string]any, er
 	var allResults []map[string]any
 
 	// 1. 标题模糊搜
-	u1 := fmt.Sprintf("%s/api/v1/search/title?keyword=%s&token=%s", mpURL, url.QueryEscape(keyword), token)
-	resp1, err := client.Get(u1)
+	u1 := fmt.Sprintf("%s/api/v1/search/title?keyword=%s", mpURL, url.QueryEscape(keyword))
+	req1, _ := http.NewRequest(http.MethodGet, u1, nil)
+	req1.Header.Set("Accept", "application/json")
+	req1.Header.Set("x-api-key", token)
+	resp1, err := client.Do(req1)
 	if err != nil {
 		return nil, fmt.Errorf("MP 请求失败(%s): %w", u1, err)
 	}
-	raw1, _ := io.ReadAll(io.LimitReader(resp1.Body, 200*1024))
+	raw1, _ := io.ReadAll(resp1.Body)
 	resp1.Body.Close()
 	if resp1.StatusCode >= 400 {
 		return nil, fmt.Errorf("MP HTTP %d: %s", resp1.StatusCode, string(raw1)[:200])
@@ -2423,25 +2445,15 @@ func mpDoSearch(s settings, keyword string, tmdbID string) ([]map[string]any, er
 
 	// 2. TMDB 精确搜
 	if tmdbID != "" {
-		u2 := fmt.Sprintf("%s/api/v1/search/media/tmdb:%s?token=%s", mpURL, tmdbID, token)
-		resp2, err := client.Get(u2)
-		if err == nil {
-			raw2, _ := io.ReadAll(io.LimitReader(resp2.Body, 200*1024))
-			resp2.Body.Close()
-			allResults = append(allResults, mpParseResults(raw2)...)
-		}
-	}
-
-	// 2. TMDB 精确搜
-	if tmdbID != "" {
-		u2 := fmt.Sprintf("%s/api/v1/search/media/tmdb:%s?token=%s", mpURL, tmdbID, url.QueryEscape(token))
+		u2 := fmt.Sprintf("%s/api/v1/search/media/tmdb:%s", mpURL, tmdbID)
 		req2, _ := http.NewRequest(http.MethodGet, u2, nil)
 		req2.Header.Set("Accept", "application/json")
+		req2.Header.Set("x-api-key", token)
 		resp2, err := client.Do(req2)
 		if err == nil {
-			defer resp2.Body.Close()
-			raw, _ := io.ReadAll(io.LimitReader(resp2.Body, 100*1024))
-			allResults = append(allResults, mpParseResults(raw)...)
+			raw2, _ := io.ReadAll(resp2.Body)
+			resp2.Body.Close()
+			allResults = append(allResults, mpParseResults(raw2)...)
 		}
 	}
 
@@ -2494,6 +2506,8 @@ func handleMPDownload(w http.ResponseWriter, r *http.Request) {
 		TorrentURL  string `json:"torrentUrl"`
 		Magnet      string `json:"magnet"`
 		Description string `json:"description"`
+		TMDBID      string `json:"tmdbId"`
+		RawData     map[string]any `json:"rawData"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -2504,36 +2518,28 @@ func handleMPDownload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先配置 MoviePilot 地址"})
 		return
 	}
-	downloadURL := body.Magnet
-	if downloadURL == "" { downloadURL = body.TorrentURL }
-	if downloadURL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少下载链接"})
-		return
-	}
-	if err := mpDownload(s, downloadURL); err != nil {
+	if err := mpDownload(s, body.RawData, body.TMDBID); err != nil {
 		writeError(w, statusFromError(err), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"message": "已提交 MoviePilot 下载"})
 }
 
-func mpDownload(s settings, downloadURL string) error {
+func mpDownload(s settings, rawData map[string]any, tmdbID string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	mpURL := s.MPUrl
-	token := s.MPToken
-	formData := url.Values{}
-	formData.Set("url", downloadURL)
-	formData.Set("name", "")
-	formData.Set("token", token)
-	req, _ := http.NewRequest(http.MethodPost, mpURL+"/api/v1/download/add", strings.NewReader(formData.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	payload := map[string]any{"torrent_in": rawData}
+	if tmdbID != "" { payload["tmdbid"], _ = strconv.Atoi(tmdbID) }
+	raw, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, mpURL+"/api/v1/download/add", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", s.MPToken)
 	resp, err := client.Do(req)
 	if err != nil { return fmt.Errorf("MoviePilot 下载失败：%w", err) }
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("MoviePilot 下载失败 HTTP %d: %s", resp.StatusCode, shortBody(body))
 	}
 	return nil
 }
-

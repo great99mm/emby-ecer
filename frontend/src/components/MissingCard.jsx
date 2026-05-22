@@ -59,13 +59,7 @@ export default function MissingCard({ group }) {
 
   const doMPDownload = async (item) => {
     try {
-      const payload = {
-        title: item.title || '',
-        torrentUrl: item.url || '',
-        magnet: item.raw?.magnet || item.url || '',
-        description: item.description || '',
-      };
-      await api('/api/mp/download', { method: 'POST', body: JSON.stringify(payload) }); toast.success('已提交下载'); }
+      await api('/api/mp/download', { method: 'POST', body: JSON.stringify({ rawData: item.raw, tmdbId: String(group.tmdbId || '') }) }); toast.success('已提交下载'); }
     catch (err) { toast.error(err.message); }
   };
 

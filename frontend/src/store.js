@@ -72,7 +72,14 @@ const useStore = create((set, get) => ({
         if (Array.isArray(saved)) get().applySearchResults(saved);
       } catch {}
     } catch {
-      get().logout();
+      // 初始化失败时保留 activeJobId，避免中断后台扫描
+      const activeJobId = get().activeJobId;
+      localStorage.removeItem('auth_token');
+      set({ token: '', username: '', scan: null, missing: [], seriesSearches: {}, transfers: {}, activeJobId: null });
+      if (activeJobId) {
+        localStorage.setItem('active_job_id', activeJobId);
+        set({ activeJobId });
+      }
     }
   },
 }));
