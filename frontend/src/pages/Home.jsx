@@ -84,20 +84,20 @@ export default function Home() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
-              onClick={() => startJob('scan', false)}
+              onClick={() => startJob('scan', true)}
               disabled={busy}
               className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
             >
-              <Radar className="w-4 h-4" />
-              全量增量扫描
+              <RefreshCw className="w-4 h-4" />
+              只扫最近变更（推荐）
             </button>
             <button
-              onClick={() => startJob('scan', true)}
+              onClick={() => startJob('scan', false)}
               disabled={busy}
               className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
             >
-              <RefreshCw className="w-4 h-4" />
-              只扫最近变更
+              <Radar className="w-4 h-4" />
+              全量增量扫描
             </button>
           </div>
         </div>
