@@ -869,6 +869,13 @@ type unmatchedMedia struct {
 	Reason      string            `json:"reason"`
 }
 
+type scanDiagnosticEntry struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+}
+
 func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
@@ -932,6 +939,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	matchedMovies := 0
 	cachedSeries := 0
 	rescannedSeries := 0
+	skippedSeries := make([]scanDiagnosticEntry, 0)
 	totalWork := len(seriesItems)*3 + len(movieItems)
 	workDone := 0
 	currentSeriesIDs := map[string]bool{}
@@ -949,6 +957,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		missingCopy := append([]missingEpisode(nil), missing...)
 		seriesCopy := append([]unmatchedMedia(nil), unmatchedSeries...)
 		movieCopy := append([]unmatchedMedia(nil), unmatchedMovies...)
+		skippedCopy := append([]scanDiagnosticEntry(nil), skippedSeries...)
 		sortMissingEpisodes(missingCopy)
 		return workDone, totalWork, map[string]any{
 			"scannedAt": time.Now().Format(time.RFC3339),
@@ -965,6 +974,13 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				"unmatchedMovies":      len(unmatchedMovies),
 				"totalMissingEpisodes": len(missing),
 				"airedOnly":            airedOnly,
+			},
+			"diagnostics": map[string]any{
+				"cacheHits":       cachedSeries,
+				"rescannedSeries": rescannedSeries,
+				"unmatchedSeries": len(unmatchedSeries),
+				"skippedCount":    len(skippedSeries),
+				"skipped":         limitScanDiagnostics(skippedCopy, 120),
 			},
 			"missing": missingCopy,
 			"unmatched": map[string]any{
@@ -994,6 +1010,11 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		onProgress(processed, total, message, current, snapshot)
 	}
 	advanceProgress(0, "开始扫描媒体库...", "初始化")
+	addSkipped := func(series embyItem, action, reason string) {
+		mu.Lock()
+		skippedSeries = append(skippedSeries, scanDiagnosticEntry{ID: series.ID, Name: series.Name, Action: action, Reason: reason})
+		mu.Unlock()
+	}
 	seriesWorkers := clampScanConcurrency(s.ScanConcurrency)
 	movieWorkers := seriesWorkers
 	if movieWorkers > 2 {
@@ -1015,6 +1036,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 					unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
 				}
 				mu.Unlock()
+				addSkipped(series, "cache", "不在最近变更范围，直接使用缓存")
 				advanceProgress(3, fmt.Sprintf("《%s》不在最近变更范围，直接使用缓存", title), title)
 				return
 			}
@@ -1030,6 +1052,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
 			}
 			mu.Unlock()
+			addSkipped(series, "cache", "指纹未变化，直接使用缓存")
 			advanceProgress(3, fmt.Sprintf("《%s》未变化，直接使用缓存", title), title)
 			return
 		}
@@ -2493,6 +2516,13 @@ func isActualEmbyEpisode(ep embyEpisode) bool {
 }
 
 func limitUnmatched(items []unmatchedMedia, limit int) []unmatchedMedia {
+	if len(items) > limit {
+		return items[:limit]
+	}
+	return items
+}
+
+func limitScanDiagnostics(items []scanDiagnosticEntry, limit int) []scanDiagnosticEntry {
 	if len(items) > limit {
 		return items[:limit]
 	}

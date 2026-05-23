@@ -15,6 +15,9 @@ export default function Home() {
   const setJobStatus = useStore(s => s.setJobStatus);
 
   const summary = scan?.summary || {};
+  const diagnostics = scan?.diagnostics || {};
+  const unmatchedSeries = scan?.unmatched?.series || [];
+  const skippedSeries = diagnostics.skipped || [];
   const scannedAt = scan?.scannedAt;
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
@@ -34,7 +37,7 @@ export default function Home() {
       <ProgressBar />
 
       {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 sm:gap-4">
         <StatCard
           label="缺集"
           value={summary.totalMissingEpisodes ?? '--'}
@@ -60,6 +63,11 @@ export default function Home() {
           label="重扫剧集"
           value={summary.seriesRescanned ?? '--'}
           icon={RefreshCw}
+        />
+        <StatCard
+          label="未匹配剧集"
+          value={summary.unmatchedSeries ?? '--'}
+          icon={AlertTriangle}
         />
       </div>
 
@@ -114,6 +122,70 @@ export default function Home() {
             </div>
           </details>
         </div>
+      </div>
+
+      <div className="card space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
+            <p className="mt-1 text-xs text-gray-400">查看缓存命中、真正重扫、未匹配数量，以及被跳过的剧集原因。</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="text-xs font-bold text-gray-500">命中缓存</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.cacheHits ?? summary.seriesCached ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="text-xs font-bold text-gray-500">真正重扫</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.rescannedSeries ?? summary.seriesRescanned ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="text-xs font-bold text-gray-500">未匹配</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.unmatchedSeries ?? summary.unmatchedSeries ?? 0}</div>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <div className="text-xs font-bold text-gray-500">跳过项目</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.skippedCount ?? skippedSeries.length ?? 0}</div>
+          </div>
+        </div>
+
+        <details>
+          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看被跳过剧集</summary>
+          <div className="mt-3 space-y-2">
+            {skippedSeries.length === 0 ? (
+              <p className="text-sm text-gray-500">本次没有被跳过的剧集。</p>
+            ) : (
+              skippedSeries.map((item, i) => (
+                <div key={`${item.id || item.name || 'skip'}-${i}`} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-gray-900">{item.name || '未知剧集'}</p>
+                      <p className="mt-1 text-xs text-gray-500">{item.reason || '无原因'}</p>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-gray-200 bg-white px-2 py-1 text-[11px] font-bold text-gray-500">{item.action || 'skip'}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
+
+        <details>
+          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看未匹配剧集</summary>
+          <div className="mt-3 space-y-2">
+            {unmatchedSeries.length === 0 ? (
+              <p className="text-sm text-gray-500">本次没有未匹配的剧集。</p>
+            ) : (
+              unmatchedSeries.map((item, i) => (
+                <div key={`${item.id || item.name || 'unmatched'}-${i}`} className="rounded-lg border border-red-200 bg-red-50 px-3 py-3">
+                  <p className="truncate text-sm font-bold text-red-900">{item.name || '未知剧集'}</p>
+                  <p className="mt-1 text-xs text-red-700">{item.reason || '未提供原因'}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
       </div>
 
       {/* Recent Missing */}
