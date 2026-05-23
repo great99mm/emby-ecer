@@ -18,6 +18,7 @@ export default function Home() {
   const diagnostics = scan?.diagnostics || {};
   const unmatchedSeries = scan?.unmatched?.series || [];
   const skippedSeries = diagnostics.skipped || [];
+  const comparedSeries = diagnostics.compared || [];
   const scannedAt = scan?.scannedAt;
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
@@ -181,6 +182,34 @@ export default function Home() {
                 <div key={`${item.id || item.name || 'unmatched'}-${i}`} className="rounded-lg border border-red-200 bg-red-50 px-3 py-3">
                   <p className="truncate text-sm font-bold text-red-900">{item.name || '未知剧集'}</p>
                   <p className="mt-1 text-xs text-red-700">{item.reason || '未提供原因'}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
+
+        <details>
+          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看已匹配比对剧集</summary>
+          <div className="mt-3 space-y-2">
+            {comparedSeries.length === 0 ? (
+              <p className="text-sm text-gray-500">暂无已匹配比对明细。</p>
+            ) : (
+              comparedSeries.map((item, i) => (
+                <div key={`${item.id || item.name || 'compared'}-${i}`} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-gray-900">{item.name || '未知剧集'}</p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        TMDB：{item.tmdbName || item.tmdbId || '未知'}{item.tmdbYear ? ` · ${item.tmdbYear}` : ''}
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">{item.reason || '已完成比对'}</p>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px] font-bold text-gray-500 leading-5">
+                      <div>Emby {item.embyEpisodes ?? 0}</div>
+                      <div>TMDB {item.tmdbEpisodes ?? 0}</div>
+                      <div className={item.missingEpisodes > 0 ? 'text-red-600' : 'text-emerald-600'}>缺 {item.missingEpisodes ?? 0}</div>
+                    </div>
+                  </div>
                 </div>
               ))
             )}

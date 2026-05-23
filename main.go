@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultPanSouURL       = "https://so.252035.xyz"
-	seriesScanCacheVersion = "series-scan-v3"
+	seriesScanCacheVersion = "series-scan-v5"
 )
 
 var (
@@ -913,6 +913,20 @@ type scanDiagnosticEntry struct {
 	Reason string `json:"reason"`
 }
 
+type scanCompareEntry struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	TMDBID          int    `json:"tmdbId"`
+	TMDBName        string `json:"tmdbName"`
+	TMDBYear        string `json:"tmdbYear"`
+	EmbyEpisodes    int    `json:"embyEpisodes"`
+	EmbySeasonCount int    `json:"embySeasonCount"`
+	TMDBEpisodes    int    `json:"tmdbEpisodes"`
+	OwnedEpisodes   int    `json:"ownedEpisodes"`
+	MissingEpisodes int    `json:"missingEpisodes"`
+	Reason          string `json:"reason"`
+}
+
 func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
@@ -977,6 +991,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	cachedSeries := 0
 	rescannedSeries := 0
 	skippedSeries := make([]scanDiagnosticEntry, 0)
+	comparedSeries := make([]scanCompareEntry, 0)
 	totalWork := len(seriesItems)*3 + len(movieItems)
 	workDone := 0
 	currentSeriesIDs := map[string]bool{}
@@ -995,6 +1010,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		seriesCopy := append([]unmatchedMedia(nil), unmatchedSeries...)
 		movieCopy := append([]unmatchedMedia(nil), unmatchedMovies...)
 		skippedCopy := append([]scanDiagnosticEntry(nil), skippedSeries...)
+		comparedCopy := append([]scanCompareEntry(nil), comparedSeries...)
 		sortMissingEpisodes(missingCopy)
 		return workDone, totalWork, map[string]any{
 			"scannedAt": time.Now().Format(time.RFC3339),
@@ -1016,8 +1032,10 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				"cacheHits":       cachedSeries,
 				"rescannedSeries": rescannedSeries,
 				"unmatchedSeries": len(unmatchedSeries),
+				"comparedCount":   len(comparedSeries),
 				"skippedCount":    len(skippedSeries),
 				"skipped":         limitScanDiagnostics(skippedCopy, 120),
+				"compared":        limitCompareDiagnostics(comparedCopy, 500),
 			},
 			"missing": missingCopy,
 			"unmatched": map[string]any{
@@ -1050,6 +1068,11 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	addSkipped := func(series embyItem, action, reason string) {
 		mu.Lock()
 		skippedSeries = append(skippedSeries, scanDiagnosticEntry{ID: series.ID, Name: series.Name, Action: action, Reason: reason})
+		mu.Unlock()
+	}
+	addCompared := func(entry scanCompareEntry) {
+		mu.Lock()
+		comparedSeries = append(comparedSeries, entry)
 		mu.Unlock()
 	}
 	seriesWorkers := clampScanConcurrency(s.ScanConcurrency)
@@ -1112,7 +1135,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		ownedTMDBEpisodes := map[int]bool{}
 		embySeasons := map[int]bool{}
 
-		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID, func(page, count int) {
+		seriesEpisodes, err := loadSeriesEpisodes(s, series.ID, func(page, count int) {
 			adjustTotal(1)
 			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
 		})
@@ -1234,6 +1257,29 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			localMissing[i].TotalEpisodes = totalTMDBCount
 			localMissing[i].OwnedEpisodes = ownedCount
 		}
+		compareReason := "已匹配并完成比对，未发现缺集"
+		if len(localMissing) > 0 {
+			compareReason = fmt.Sprintf("已匹配并发现 %d 集缺失", len(localMissing))
+		} else if totalTMDBCount == 0 {
+			compareReason = "TMDB 没有可比对的已播出集数"
+		} else if len(seriesEpisodes) == 0 {
+			compareReason = "Emby 没有读取到实际已拥有剧集，且未发现可加入的缺集"
+		} else if ownedCount >= totalTMDBCount {
+			compareReason = "Emby 读取到的季集号/TMDB 集 ID 已覆盖 TMDB 已播出集数"
+		}
+		addCompared(scanCompareEntry{
+			ID:              series.ID,
+			Name:            series.Name,
+			TMDBID:          resolved,
+			TMDBName:        officialTitle,
+			TMDBYear:        firstYear(tv.FirstAirDate),
+			EmbyEpisodes:    len(seriesEpisodes),
+			EmbySeasonCount: len(embySeasons),
+			TMDBEpisodes:    totalTMDBCount,
+			OwnedEpisodes:   ownedCount,
+			MissingEpisodes: len(localMissing),
+			Reason:          compareReason,
+		})
 
 		mu.Lock()
 		matchedSeries++
@@ -2050,27 +2096,26 @@ func embyItemsRoute(s settings) string {
 	return "/Items"
 }
 
-func loadSeriesEpisodes(s settings, itemRoute, seriesID string, onPage func(page, count int)) ([]embyEpisode, error) {
+func loadSeriesEpisodes(s settings, seriesID string, onPage func(page, count int)) ([]embyEpisode, error) {
 	startIndex := 0
 	pageLimit := 200
 	items := make([]embyEpisode, 0, 256)
 	pageNum := 0
 	for {
 		var page embyEpisodesResp
-		if err := embyGet(s, itemRoute, map[string]string{
-			"Recursive":        "true",
-			"IncludeItemTypes": "Episode",
-			"Fields":           "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
-			"SortBy":           "ParentIndexNumber,IndexNumber",
-			"SeriesIds":        seriesID,
-			"StartIndex":       strconv.Itoa(startIndex),
-			"Limit":            strconv.Itoa(pageLimit),
+		route := "/Shows/" + url.PathEscape(seriesID) + "/Episodes"
+		if err := embyGet(s, route, map[string]string{
+			"IsMissing":  "false",
+			"Fields":     "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
+			"SortBy":     "ParentIndexNumber,IndexNumber",
+			"StartIndex": strconv.Itoa(startIndex),
+			"Limit":      strconv.Itoa(pageLimit),
 		}, &page); err != nil {
 			return nil, err
 		}
 		pageNum++
 		for _, ep := range page.Items {
-			if ep.SeriesID == "" || !isActualEmbyEpisode(ep) {
+			if !isActualEmbyEpisode(ep) {
 				continue
 			}
 			items = append(items, ep)
@@ -2614,6 +2659,19 @@ func limitUnmatched(items []unmatchedMedia, limit int) []unmatchedMedia {
 }
 
 func limitScanDiagnostics(items []scanDiagnosticEntry, limit int) []scanDiagnosticEntry {
+	if len(items) > limit {
+		return items[:limit]
+	}
+	return items
+}
+
+func limitCompareDiagnostics(items []scanCompareEntry, limit int) []scanCompareEntry {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].MissingEpisodes == items[j].MissingEpisodes {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].MissingEpisodes > items[j].MissingEpisodes
+	})
 	if len(items) > limit {
 		return items[:limit]
 	}
