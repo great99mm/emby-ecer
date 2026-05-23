@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, Database, RefreshCw, Trash2 } from 'lucide-react';
+import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, RefreshCw, Trash2, Activity } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
 
@@ -38,7 +38,7 @@ export default function Home() {
       <ProgressBar />
 
       {/* Stats */}
-      <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
         <StatCard
           label="缺集"
           value={summary.totalMissingEpisodes ?? '--'}
@@ -54,11 +54,6 @@ export default function Home() {
           label="电影"
           value={summary.movieTotal ?? '--'}
           icon={Film}
-        />
-        <StatCard
-          label="缓存命中"
-          value={summary.seriesCached ?? '--'}
-          icon={Database}
         />
         <StatCard
           label="重扫剧集"
@@ -125,13 +120,17 @@ export default function Home() {
         </div>
       </div>
 
-      <div className="card space-y-4">
+      <details className="card space-y-4">
+        <summary className="cursor-pointer list-none">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
             <p className="mt-1 text-xs text-gray-400">查看缓存命中、真正重扫、未匹配数量，以及被跳过的剧集原因。</p>
           </div>
+          <Activity className="h-5 w-5 text-gray-400" />
         </div>
+        </summary>
+        <div className="mt-4 space-y-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
             <div className="text-xs font-bold text-gray-500">命中缓存</div>
@@ -215,7 +214,8 @@ export default function Home() {
             )}
           </div>
         </details>
-      </div>
+        </div>
+      </details>
 
       {/* Recent Missing */}
       <div className="card">

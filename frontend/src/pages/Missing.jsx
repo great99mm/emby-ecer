@@ -1,7 +1,7 @@
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, Database, RefreshCw, Trash2 } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2 } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -90,11 +90,10 @@ export default function Missing() {
       <ProgressBar />
 
       {/* Stats Row */}
-      <div className="grid grid-cols-2 xl:grid-cols-7 gap-3">
+      <div className="grid grid-cols-2 xl:grid-cols-6 gap-3">
         <StatCard label="追踪剧集" value={groupList.length} icon={Tv} />
         <StatCard label="实有集数" value={totalOwned} icon={Film} />
         <StatCard label="缺失集数" value={totalMissing} icon={AlertTriangle} accent />
-        <StatCard label="缓存命中" value={summary.seriesCached ?? '--'} icon={Database} />
         <StatCard label="重扫剧集" value={summary.seriesRescanned ?? '--'} icon={RefreshCw} />
         <StatCard label="未匹配剧集" value={summary.unmatchedSeries ?? '--'} icon={AlertTriangle} />
         <div className="card flex flex-col justify-between">
@@ -128,11 +127,17 @@ export default function Missing() {
         </div>
       </details>
 
-      <div className="card space-y-4">
-        <div>
-          <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
-          <p className="mt-1 text-xs text-gray-400">帮助确认哪些剧集命中缓存、真正重扫、未匹配，和为什么被跳过。</p>
+      <details className="card space-y-4">
+        <summary className="cursor-pointer list-none">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
+            <p className="mt-1 text-xs text-gray-400">帮助确认哪些剧集命中缓存、真正重扫、未匹配，和为什么被跳过。</p>
+          </div>
+          <Activity className="h-5 w-5 text-gray-400" />
         </div>
+        </summary>
+        <div className="mt-4 space-y-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
             <div className="text-xs font-bold text-gray-500">命中缓存</div>
@@ -216,7 +221,8 @@ export default function Missing() {
             )}
           </div>
         </details>
-      </div>
+        </div>
+      </details>
 
       {/* Card Grid */}
       <div>
