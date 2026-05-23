@@ -288,9 +288,13 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			AiredOnly  bool `json:"airedOnly"`
 			MaxSeries  int  `json:"maxSeries"`
 			RecentOnly bool `json:"recentOnly"`
+			ClearCache bool `json:"clearCache"`
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
+		if body.ClearCache {
+			clearLocalScanCaches()
+		}
 		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
@@ -1692,6 +1696,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AiredOnly  bool   `json:"airedOnly"`
 		MaxSeries  int    `json:"maxSeries"`
 		RecentOnly bool   `json:"recentOnly"`
+		ClearCache bool   `json:"clearCache"`
 	}
 	body.AiredOnly = true
 	_ = readJSON(r, &body)
@@ -1715,7 +1720,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	j := jobMgr.create(body.Type)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly)
+	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache)
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
 
@@ -1734,7 +1739,7 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
-func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool) {
+func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool) {
 	changedSince := lastScanTime()
 	modeText := "全量增量模式"
 	if recentOnly {
@@ -1749,6 +1754,13 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		j.Message = "开始扫描媒体库..."
 		j.Current = modeText
 	})
+	if clearCache {
+		jobMgr.update(id, func(j *job) {
+			j.Message = "正在清空本地缓存..."
+			j.Current = "清空缓存"
+		})
+		clearLocalScanCaches()
+	}
 
 	scanProgressMax := 99
 	searchProgressBase := 60
@@ -2656,6 +2668,17 @@ func (s *seriesScanCacheStore) flushLocked() error {
 	return nil
 }
 
+func (s *seriesScanCacheStore) Clear() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = map[string]seriesScanCacheEntry{}
+	s.dirty = true
+	return s.flushLocked()
+}
+
 func (s *tmdbCacheStore) Get(key string, out any) bool {
 	if s == nil {
 		return false
@@ -2711,6 +2734,16 @@ func (s *tmdbCacheStore) persistLocked() error {
 	return os.WriteFile(s.path, raw, 0o600)
 }
 
+func (s *tmdbCacheStore) Clear() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = map[string]tmdbCacheEntry{}
+	return s.persistLocked()
+}
+
 func scanResultPath() string {
 	return getenv("SCAN_RESULT_PATH", filepath.Join(filepath.Dir(getenv("CONFIG_PATH", filepath.Join("data", "config.json"))), "scan-result.json"))
 }
@@ -2726,6 +2759,15 @@ func lastScanTime() time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func clearLocalScanCaches() {
+	if seriesScanCache != nil {
+		_ = seriesScanCache.Clear()
+	}
+	if tmdbCache != nil {
+		_ = tmdbCache.Clear()
+	}
 }
 
 func scanModeLabel(recentOnly bool) string {

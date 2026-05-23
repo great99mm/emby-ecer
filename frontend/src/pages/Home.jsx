@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, Database, RefreshCw } from 'lucide-react';
+import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, Database, RefreshCw, Trash2 } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
 
@@ -18,9 +18,9 @@ export default function Home() {
   const scannedAt = scan?.scannedAt;
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
-  const startJob = async (type, recentOnly = false) => {
+  const startJob = async (type, recentOnly = false, clearCache = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly, clearCache }) });
       setActiveJobId(data.jobId);
       setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
     } catch (err) {
@@ -82,24 +82,37 @@ export default function Home() {
             <Clock className="w-4 h-4" />
             <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}{summary.scanMode === 'recent' ? ' · 最近变更模式' : summary.scanMode === 'full' ? ' · 全量增量模式' : ''}</span>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <button
-              onClick={() => startJob('scan', true)}
-              disabled={busy}
-              className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
-            >
-              <RefreshCw className="w-4 h-4" />
-              只扫最近变更（推荐）
-            </button>
-            <button
-              onClick={() => startJob('scan', false)}
-              disabled={busy}
-              className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
-            >
-              <Radar className="w-4 h-4" />
-              全量增量扫描
-            </button>
-          </div>
+          <button
+            onClick={() => startJob('scan', false, false)}
+            disabled={busy}
+            className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+          >
+            <Radar className="w-4 h-4" />
+            全量扫描
+          </button>
+          <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+            <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => startJob('scan', true, false)}
+                disabled={busy}
+                className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
+              >
+                <RefreshCw className="w-4 h-4" />
+                只扫最近变更
+              </button>
+              <button
+                type="button"
+                onClick={() => startJob('scan', false, true)}
+                disabled={busy}
+                className="btn-outline w-full flex items-center justify-center gap-2 text-sm text-red-600 border-red-200 hover:bg-red-50"
+              >
+                <Trash2 className="w-4 h-4" />
+                清空本地缓存后扫描
+              </button>
+            </div>
+          </details>
         </div>
       </div>
 
