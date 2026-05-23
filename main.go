@@ -24,7 +24,10 @@ import (
 	"time"
 )
 
-const defaultPanSouURL = "https://so.252035.xyz"
+const (
+	defaultPanSouURL       = "https://so.252035.xyz"
+	seriesScanCacheVersion = "series-scan-v2"
+)
 
 var (
 	appUsers        map[string]string
@@ -1265,46 +1268,33 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 func resolveTmdbTV(s settings, series embyItem) (int, error) {
 	// 1. Validate direct TMDB ID from Emby
 	if id := parseInt(providerID(series.ProviderIDs, "tmdb")); id > 0 {
-		var tv tmdbTVDetail
-		if err := tmdbGet(s, fmt.Sprintf("/tv/%d", id), map[string]string{"language": "zh-CN"}, &tv); err == nil {
-			if verifyTMDBMatch(series, tv.Name, tv.OriginalName, tv.FirstAirDate) {
-				return id, nil
-			}
-		}
+		return id, nil
 	}
 	// 2. TVDB -> TMDB (also validate)
 	if tvdb := providerID(series.ProviderIDs, "tvdb"); tvdb != "" {
 		if id, err := tmdbFindExternal(s, tvdb, "tvdb_id", true); err == nil && id > 0 {
-			var tv tmdbTVDetail
-			if err := tmdbGet(s, fmt.Sprintf("/tv/%d", id), map[string]string{"language": "zh-CN"}, &tv); err == nil {
-				if verifyTMDBMatch(series, tv.Name, tv.OriginalName, tv.FirstAirDate) {
-					return id, nil
-				}
-			}
+			return id, nil
 		}
 	}
 	// 3. IMDb -> TMDB (also validate)
 	if imdb := providerID(series.ProviderIDs, "imdb"); imdb != "" {
 		if id, err := tmdbFindExternal(s, imdb, "imdb_id", true); err == nil && id > 0 {
-			var tv tmdbTVDetail
-			if err := tmdbGet(s, fmt.Sprintf("/tv/%d", id), map[string]string{"language": "zh-CN"}, &tv); err == nil {
-				if verifyTMDBMatch(series, tv.Name, tv.OriginalName, tv.FirstAirDate) {
-					return id, nil
-				}
-			}
+			return id, nil
 		}
 	}
 	// 4. Title search (strict: title + year must match)
-	query := map[string]string{"language": "zh-CN", "query": series.Name}
-	if effectiveYear(series) > 0 {
-		query["first_air_date_year"] = strconv.Itoa(effectiveYear(series))
-	}
-	var resp tmdbSearchResp
-	if err := tmdbGet(s, "/search/tv", query, &resp); err != nil {
-		return 0, err
-	}
-	if best := bestTMDBTVMatch(series, resp.Results); best != nil {
-		return best.ID, nil
+	for _, keyword := range tvSearchQueries(series) {
+		query := map[string]string{"language": "zh-CN", "query": keyword}
+		if effectiveYear(series) > 0 {
+			query["first_air_date_year"] = strconv.Itoa(effectiveYear(series))
+		}
+		var resp tmdbSearchResp
+		if err := tmdbGet(s, "/search/tv", query, &resp); err != nil {
+			return 0, err
+		}
+		if best := bestTMDBTVMatch(series, resp.Results); best != nil {
+			return best.ID, nil
+		}
 	}
 	return 0, nil
 }
@@ -2406,6 +2396,12 @@ func bestTMDBTVMatch(series embyItem, items []tmdbSearchItem) *tmdbSearchItem {
 			return item
 		}
 	}
+	for i := range items {
+		item := &items[i]
+		if yearClose(effectiveYear(series), item.FirstAirDate) {
+			return item
+		}
+	}
 	return nil
 }
 
@@ -2454,7 +2450,7 @@ func titleMatchesAny(targets, candidates []string) bool {
 			if candidate == "" {
 				continue
 			}
-			if target == candidate {
+			if target == candidate || titleContains(target, candidate) {
 				return true
 			}
 		}
@@ -2462,8 +2458,40 @@ func titleMatchesAny(targets, candidates []string) bool {
 	return false
 }
 
+func titleContains(a, b string) bool {
+	if len([]rune(a)) < 4 || len([]rune(b)) < 4 {
+		return false
+	}
+	return strings.Contains(a, b) || strings.Contains(b, a)
+}
+
+func tvSearchQueries(series embyItem) []string {
+	queries := []string{series.Name, cleanSeasonSuffix(series.Name), series.OriginalTitle, cleanSeasonSuffix(series.OriginalTitle)}
+	out := make([]string, 0, len(queries))
+	for _, query := range queries {
+		query = strings.TrimSpace(query)
+		if query != "" && !stringSliceContains(out, query) {
+			out = append(out, query)
+		}
+	}
+	return out
+}
+
+func cleanSeasonSuffix(value string) string {
+	value = strings.TrimSpace(value)
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\s+S\d{1,2}\s*$`),
+		regexp.MustCompile(`(?i)\s+Season\s*\d{1,2}\s*$`),
+		regexp.MustCompile(`\s+第[0-9一二三四五六七八九十百]+季\s*$`),
+	}
+	for _, pattern := range patterns {
+		value = pattern.ReplaceAllString(value, "")
+	}
+	return strings.TrimSpace(value)
+}
+
 func normalizeTitle(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ToLower(cleanSeasonSuffix(value))
 	replacer := strings.NewReplacer(
 		" ", "",
 		"-", "",
@@ -2530,6 +2558,7 @@ func cloneSeriesScanCacheEntry(entry seriesScanCacheEntry) seriesScanCacheEntry 
 
 func seriesFingerprint(item embyItem, airedOnly bool) string {
 	return strings.Join([]string{
+		seriesScanCacheVersion,
 		strings.TrimSpace(item.ID),
 		strings.TrimSpace(item.Name),
 		strings.TrimSpace(item.OriginalTitle),
