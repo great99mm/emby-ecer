@@ -25,13 +25,15 @@ function JobPoller() {
         if (j.result?.scan) {
           setScan(j.result.scan);
         }
-        if (j.status === 'done' && j.result) {
-          if (j.result.searched) applySearchResults(j.result.searched);
+        if (j.status === 'done') {
+          if (j.result?.searched) applySearchResults(j.result.searched);
           clearJob();
         } else if (j.status === 'error') {
           clearJob();
         }
-      } catch {}
+      } catch {
+        clearJob();
+      }
     };
     poll();
     intervalRef.current = setInterval(poll, 2000);

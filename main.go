@@ -33,6 +33,8 @@ var (
 	store           *settingsStore
 	tmdbCache       *tmdbCacheStore
 	seriesScanCache *seriesScanCacheStore
+	activeScanMu    sync.Mutex
+	activeScanJobID string
 	httpCli         = &http.Client{Timeout: 45 * time.Second}
 
 	pansouToken = struct {
@@ -103,6 +105,38 @@ func (m *jobManager) update(id string, fn func(*job)) {
 		fn(j)
 		j.UpdatedAt = time.Now()
 	}
+}
+
+func activateScanJob(id string) {
+	activeScanMu.Lock()
+	previous := activeScanJobID
+	activeScanJobID = id
+	activeScanMu.Unlock()
+
+	if previous != "" && previous != id {
+		jobMgr.update(previous, func(j *job) {
+			if j.Status == jobRunning || j.Status == jobPending {
+				j.Status = jobError
+				j.Error = "已被新的扫描任务替换"
+				j.Message = "已被新的扫描任务替换"
+				j.Current = "已替换"
+			}
+		})
+	}
+}
+
+func isActiveScanJob(id string) bool {
+	activeScanMu.Lock()
+	defer activeScanMu.Unlock()
+	return activeScanJobID == id
+}
+
+func finishActiveScanJob(id string) {
+	activeScanMu.Lock()
+	if activeScanJobID == id {
+		activeScanJobID = ""
+	}
+	activeScanMu.Unlock()
 }
 
 func randomID(n int) string {
@@ -1743,6 +1777,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	j := jobMgr.create(body.Type)
+	activateScanJob(j.ID)
 	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache)
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
@@ -1763,6 +1798,14 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool) {
+	defer finishActiveScanJob(id)
+	update := func(fn func(*job)) bool {
+		if !isActiveScanJob(id) {
+			return false
+		}
+		jobMgr.update(id, fn)
+		return true
+	}
 	changedSince := lastScanTime()
 	modeText := "全量增量模式"
 	if recentOnly {
@@ -1771,14 +1814,14 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 			modeText = "最近变更模式（首次将执行全量）"
 		}
 	}
-	jobMgr.update(id, func(j *job) {
+	update(func(j *job) {
 		j.Status = jobRunning
 		j.Progress = 1
 		j.Message = "开始扫描媒体库..."
 		j.Current = modeText
 	})
 	if clearCache {
-		jobMgr.update(id, func(j *job) {
+		update(func(j *job) {
 			j.Message = "正在清空本地缓存..."
 			j.Current = "清空缓存"
 		})
@@ -1798,7 +1841,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		for {
 			select {
 			case <-ticker.C:
-				jobMgr.update(id, func(j *job) {
+				update(func(j *job) {
 					if j.Status == jobRunning && j.Progress < 8 {
 						j.Progress++
 					}
@@ -1828,7 +1871,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		case []any:
 			missingCount = len(items)
 		}
-		jobMgr.update(id, func(j *job) {
+		update(func(j *job) {
 			if progress > j.Progress {
 				j.Progress = progress
 			}
@@ -1839,7 +1882,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	})
 	close(done)
 	if err != nil {
-		jobMgr.update(id, func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
+		update(func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
 		return
 	}
 	_ = saveScanResult(result)
@@ -1851,7 +1894,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		missingCount = len(items)
 	}
 
-	jobMgr.update(id, func(j *job) {
+	update(func(j *job) {
 		if typ == "scan" {
 			j.Progress = 100
 			j.Status = jobDone
@@ -1872,7 +1915,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	// scan-search: 按剧名去重后搜索（不逐集搜）
 	missingList, _ := result["missing"].([]missingEpisode)
 	if len(missingList) == 0 {
-		jobMgr.update(id, func(j *job) { j.Status = jobDone; j.Progress = 100; j.Message = "无缺失集数，无需搜索" })
+		update(func(j *job) { j.Status = jobDone; j.Progress = 100; j.Message = "无缺失集数，无需搜索" })
 		return
 	}
 
@@ -1911,7 +1954,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		if total > 0 {
 			progress = searchProgressBase + (i*(99-searchProgressBase))/total
 		}
-		jobMgr.update(id, func(j *job) {
+		update(func(j *job) {
 			j.Progress = progress
 			j.Message = fmt.Sprintf("搜索中 (%d/%d): %s (缺 %d 集)", i+1, total, title, len(grp.Episodes))
 			j.Current = title
@@ -1928,7 +1971,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	}
 
 	_ = saveSearchResults(searched)
-	jobMgr.update(id, func(j *job) {
+	update(func(j *job) {
 		j.Status = jobDone
 		j.Progress = 100
 		j.Message = fmt.Sprintf("扫描搜索完成，共 %d 个剧集", len(showOrder))
