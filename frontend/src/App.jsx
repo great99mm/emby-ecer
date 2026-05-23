@@ -10,29 +10,55 @@ import Settings from './pages/Settings';
 
 function JobPoller() {
   const activeJobId = useStore(s => s.activeJobId);
+  const setActiveJobId = useStore(s => s.setActiveJobId);
   const setJobStatus = useStore(s => s.setJobStatus);
   const setScan = useStore(s => s.setScan);
   const applySearchResults = useStore(s => s.applySearchResults);
   const clearJob = useStore(s => s.clearJob);
   const intervalRef = useRef(null);
 
+  const applyJob = (j) => {
+    setJobStatus(j);
+    if (j.result?.scan) {
+      setScan(j.result.scan);
+    }
+    if (j.status === 'done') {
+      if (j.result?.searched) applySearchResults(j.result.searched);
+      clearJob();
+    } else if (j.status === 'error') {
+      clearJob();
+    }
+  };
+
+  const recoverActiveJob = async () => {
+    const data = await api('/api/jobs/active');
+    if (data.job?.id) {
+      setActiveJobId(data.job.id);
+      applyJob(data.job);
+      return true;
+    }
+    return false;
+  };
+
   useEffect(() => {
-    if (!activeJobId) return;
     const poll = async () => {
       try {
+        if (!activeJobId) {
+          await recoverActiveJob();
+          return;
+        }
         const j = await api(`/api/jobs/${activeJobId}`);
-        setJobStatus(j);
-        if (j.result?.scan) {
-          setScan(j.result.scan);
+        applyJob(j);
+      } catch (err) {
+        // 只有确认服务端没有活跃任务时才清理本地任务，避免刷新或跨设备轮询抖动导致任务条消失。
+        try {
+          const recovered = await recoverActiveJob();
+          if (!recovered && err?.status === 404) {
+            clearJob();
+          }
+        } catch {
+          // 网络/认证瞬时失败时保留当前任务状态，下次轮询继续恢复。
         }
-        if (j.status === 'done') {
-          if (j.result?.searched) applySearchResults(j.result.searched);
-          clearJob();
-        } else if (j.status === 'error') {
-          clearJob();
-        }
-      } catch {
-        clearJob();
       }
     };
     poll();

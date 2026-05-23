@@ -142,6 +142,12 @@ func finishActiveScanJob(id string) {
 	activeScanMu.Unlock()
 }
 
+func currentActiveScanJobID() string {
+	activeScanMu.Lock()
+	defer activeScanMu.Unlock()
+	return activeScanJobID
+}
+
 func randomID(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
@@ -387,6 +393,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/jobs" && r.Method == http.MethodPost:
 		handleCreateJob(w, r)
+
+	case r.URL.Path == "/api/jobs/active" && r.Method == http.MethodGet:
+		handleGetActiveJob(w, r)
 
 	case strings.HasPrefix(r.URL.Path, "/api/jobs/") && r.Method == http.MethodGet:
 		handleGetJob(w, r)
@@ -1836,6 +1845,21 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
+}
+
+func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
+	id := currentActiveScanJobID()
+	if id == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
+		return
+	}
+	j := jobMgr.get(id)
+	if j == nil || (j.Status != jobRunning && j.Status != jobPending) {
+		finishActiveScanJob(id)
+		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool) {
