@@ -6,7 +6,7 @@ export default function ProgressBar() {
 
   if (!jobStatus) return null;
 
-  const { status, progress = 0, message = '' } = jobStatus;
+  const { status, progress = 0, message = '', current = '' } = jobStatus;
   const isDone = status === 'done';
   const isError = status === 'error';
   const isFinal = isDone || isError;
@@ -27,6 +27,12 @@ export default function ProgressBar() {
           style={{ width: `${progress}%` }}
         />
       </div>
+      {!!current && !isFinal && (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-gray-400">当前扫描</div>
+          <div className="mt-1 text-sm font-medium text-gray-700 break-all">{current}</div>
+        </div>
+      )}
       {isFinal && (
         <button onClick={clearJob} className="mt-3 w-full rounded-md py-2 text-xs font-bold border border-gray-300 hover:bg-gray-100 transition-colors">
           关闭

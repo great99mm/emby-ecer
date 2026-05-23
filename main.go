@@ -58,6 +58,7 @@ type job struct {
 	Status    jobStatus `json:"status"`
 	Progress  int       `json:"progress"`
 	Message   string    `json:"message"`
+	Current   string    `json:"current,omitempty"`
 	Result    any       `json:"result,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -835,7 +836,7 @@ type unmatchedMedia struct {
 	Reason      string            `json:"reason"`
 }
 
-func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(processed, total int, message string, snapshot map[string]any)) (map[string]any, error) {
+func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
 	}
@@ -927,7 +928,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		totalWork += delta
 		mu.Unlock()
 	}
-	advanceProgress := func(delta int, message string) {
+	advanceProgress := func(delta int, message, current string) {
 		if delta > 0 {
 			mu.Lock()
 			workDone += delta
@@ -937,9 +938,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			return
 		}
 		processed, total, snapshot := buildSnapshot()
-		onProgress(processed, total, message, snapshot)
+		onProgress(processed, total, message, current, snapshot)
 	}
-	advanceProgress(0, "开始扫描媒体库...")
+	advanceProgress(0, "开始扫描媒体库...", "初始化")
 
 	parallelFor(seriesItems, 6, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
@@ -948,24 +949,26 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "找不到 TMDB 剧集 ID"))
 			mu.Unlock()
-			advanceProgress(3, fmt.Sprintf("扫描《%s》时未找到 TMDB 剧集 ID", title))
+			advanceProgress(3, fmt.Sprintf("扫描《%s》时未找到 TMDB 剧集 ID", title), title)
 			return
 		}
-		advanceProgress(1, fmt.Sprintf("已匹配《%s》的 TMDB 信息", title))
+		advanceProgress(1, fmt.Sprintf("已匹配《%s》的 TMDB 信息", title), title)
 
 		owned := map[string]bool{}
 		ownedTMDBEpisodes := map[int]bool{}
 		embySeasons := map[int]bool{}
 
-		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID)
+		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID, func(page, count int) {
+			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集（第 %d 页，累计 %d 集）", title, page, count), title)
+		})
 		if err != nil {
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error()))
 			mu.Unlock()
-			advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title))
+			advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
 			return
 		}
-		advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title))
+		advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
 
 		for _, ep := range seriesEpisodes {
 			if ep.ParentIndexNumber > 0 && ep.IndexNumber > 0 {
@@ -984,10 +987,10 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 TMDB 剧集失败："+err.Error()))
 			mu.Unlock()
-			advanceProgress(1, fmt.Sprintf("读取《%s》TMDB 剧集详情失败", title))
+			advanceProgress(1, fmt.Sprintf("读取《%s》TMDB 剧集详情失败", title), title)
 			return
 		}
-		advanceProgress(1, fmt.Sprintf("开始比对《%s》的季集信息", title))
+		advanceProgress(1, fmt.Sprintf("开始比对《%s》的季集信息", title), title)
 		officialTitle := fallback(tv.Name, series.Name)
 		originalTitle := fallback(tv.OriginalName, fallback(series.OriginalTitle, series.Name))
 		localMissing := make([]missingEpisode, 0)
@@ -1006,7 +1009,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			}
 			var seasonDetail tmdbSeasonDetail
 			if err := tmdbGet(s, fmt.Sprintf("/tv/%d/season/%d", resolved, season.SeasonNumber), map[string]string{"language": "zh-CN"}, &seasonDetail); err != nil {
-				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季读取失败，跳过", officialTitle, season.SeasonNumber))
+				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季读取失败，跳过", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 				continue
 			}
 			// 跳过“幽灵季”：Emby 中没有该季，且 TMDB 该季也没有任何已播出集数
@@ -1064,7 +1067,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 					TMDBURL:       fmt.Sprintf("https://www.themoviedb.org/tv/%d/season/%d/episode/%d", resolved, season.SeasonNumber, ep.EpisodeNumber),
 				})
 			}
-			advanceProgress(1, fmt.Sprintf("已比对《%s》第 %d 季", officialTitle, season.SeasonNumber))
+			advanceProgress(1, fmt.Sprintf("已比对《%s》第 %d 季", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 		}
 
 		// 填入每集的总数和拥有数
@@ -1086,12 +1089,12 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		if err != nil || resolved == 0 {
 			unmatchedMovies = append(unmatchedMovies, simpleMedia(movie, "找不到 TMDB 电影 ID"))
 			mu.Unlock()
-			advanceProgress(1, fmt.Sprintf("扫描电影《%s》时未找到 TMDB 电影 ID", title))
+			advanceProgress(1, fmt.Sprintf("扫描电影《%s》时未找到 TMDB 电影 ID", title), title)
 			return
 		}
 		matchedMovies++
 		mu.Unlock()
-		advanceProgress(1, fmt.Sprintf("已完成电影《%s》比对", title))
+		advanceProgress(1, fmt.Sprintf("已完成电影《%s》比对", title), title)
 	})
 	_, _, result := buildSnapshot()
 	return result, nil
@@ -1630,9 +1633,14 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
-	jobMgr.update(id, func(j *job) { j.Status = jobRunning; j.Progress = 1; j.Message = "开始扫描媒体库..." })
+	jobMgr.update(id, func(j *job) {
+		j.Status = jobRunning
+		j.Progress = 1
+		j.Message = "开始扫描媒体库..."
+		j.Current = "初始化"
+	})
 
-	scanProgressMax := 95
+	scanProgressMax := 99
 	searchProgressBase := 60
 	if typ == "scan-search" {
 		scanProgressMax = 55
@@ -1657,13 +1665,13 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 		}
 	}()
 
-	result, err := scanLibrary(s, airedOnly, maxSeries, func(processed, total int, detail string, snapshot map[string]any) {
+	result, err := scanLibrary(s, airedOnly, maxSeries, func(processed, total int, detail, current string, snapshot map[string]any) {
 		if total <= 0 {
 			total = 1
 		}
-		progress := 5
-		if scanProgressMax > 5 {
-			progress = 5 + (processed*(scanProgressMax-5))/total
+		progress := (processed * scanProgressMax) / total
+		if progress < 1 {
+			progress = 1
 		}
 		if processed >= total {
 			progress = scanProgressMax
@@ -1680,6 +1688,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 				j.Progress = progress
 			}
 			j.Message = fmt.Sprintf("扫描中 (%d/%d)，已发现 %d 集缺失｜%s", processed, total, missingCount, detail)
+			j.Current = current
 			j.Result = map[string]any{"scan": snapshot}
 		})
 	})
@@ -1702,9 +1711,11 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 			j.Progress = 100
 			j.Status = jobDone
 			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失", missingCount)
+			j.Current = "完成"
 		} else {
 			j.Progress = searchProgressBase
 			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失，开始搜索资源", missingCount)
+			j.Current = "搜索准备中"
 		}
 		j.Result = map[string]any{"scan": result}
 	})
@@ -1758,6 +1769,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 		jobMgr.update(id, func(j *job) {
 			j.Progress = progress
 			j.Message = fmt.Sprintf("搜索中 (%d/%d): %s (缺 %d 集)", i+1, total, title, len(grp.Episodes))
+			j.Current = title
 		})
 
 		item := searchItem{Title: title, Episodes: grp.Episodes}
@@ -1775,6 +1787,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 		j.Status = jobDone
 		j.Progress = 100
 		j.Message = fmt.Sprintf("扫描搜索完成，共 %d 个剧集", len(showOrder))
+		j.Current = "完成"
 		j.Result = map[string]any{"scan": result, "searched": searched}
 	})
 }
@@ -1854,10 +1867,11 @@ func embyItemsRoute(s settings) string {
 	return "/Items"
 }
 
-func loadSeriesEpisodes(s settings, itemRoute, seriesID string) ([]embyEpisode, error) {
+func loadSeriesEpisodes(s settings, itemRoute, seriesID string, onPage func(page, count int)) ([]embyEpisode, error) {
 	startIndex := 0
-	pageLimit := 500
+	pageLimit := 200
 	items := make([]embyEpisode, 0, 256)
+	pageNum := 0
 	for {
 		var page embyEpisodesResp
 		if err := embyGet(s, itemRoute, map[string]string{
@@ -1871,11 +1885,15 @@ func loadSeriesEpisodes(s settings, itemRoute, seriesID string) ([]embyEpisode, 
 		}, &page); err != nil {
 			return nil, err
 		}
+		pageNum++
 		for _, ep := range page.Items {
 			if ep.SeriesID == "" || !isActualEmbyEpisode(ep) {
 				continue
 			}
 			items = append(items, ep)
+		}
+		if onPage != nil {
+			onPage(pageNum, len(items))
 		}
 		if len(page.Items) < pageLimit {
 			break
