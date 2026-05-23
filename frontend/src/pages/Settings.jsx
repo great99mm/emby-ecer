@@ -123,6 +123,7 @@ export default function Settings() {
         <Input name="embyUrl" label="Emby 地址" value={get('embyUrl')} onChange={e => update('embyUrl', e.target.value)} placeholder="http://你的Emby:8096" />
         <Input name="embyApiKey" label="Emby API Key" value={get('embyApiKey')} onChange={e => update('embyApiKey', e.target.value)} type="password" placeholder="留空表示不覆盖" />
         <Input name="embyUserId" label="Emby UserId (可选)" value={get('embyUserId')} onChange={e => update('embyUserId', e.target.value)} placeholder="不填则使用全局 /Items" />
+        <Input name="scanConcurrency" label="扫描并发数" value={get('scanConcurrency')} onChange={e => update('scanConcurrency', e.target.value)} type="number" placeholder="默认 4，最大 16" />
       </AuthSection>
 
       <AuthSection title="TMDB" icon={sectionIcons.TMDB} ready={ready.tmdb} onTest={testConnection} target="tmdb">

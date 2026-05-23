@@ -112,18 +112,19 @@ func randomID(n int) string {
 }
 
 type settings struct {
-	EmbyURL        string `json:"embyUrl"`
-	EmbyAPIKey     string `json:"embyApiKey"`
-	EmbyUserID     string `json:"embyUserId"`
-	TMDBAPIKey     string `json:"tmdbApiKey"`
-	PansouURL      string `json:"pansouUrl"`
-	PansouUsername string `json:"pansouUsername"`
-	PansouPassword string `json:"pansouPassword"`
-	PansouToken    string `json:"pansouToken"`
-	P115Cookie     string `json:"p115Cookie"`
-	P115TargetCID  string `json:"p115TargetCid"`
-	MPUrl          string `json:"mpUrl"`
-	MPToken        string `json:"mpToken"`
+	EmbyURL         string `json:"embyUrl"`
+	EmbyAPIKey      string `json:"embyApiKey"`
+	EmbyUserID      string `json:"embyUserId"`
+	TMDBAPIKey      string `json:"tmdbApiKey"`
+	ScanConcurrency int    `json:"scanConcurrency"`
+	PansouURL       string `json:"pansouUrl"`
+	PansouUsername  string `json:"pansouUsername"`
+	PansouPassword  string `json:"pansouPassword"`
+	PansouToken     string `json:"pansouToken"`
+	P115Cookie      string `json:"p115Cookie"`
+	P115TargetCID   string `json:"p115TargetCid"`
+	MPUrl           string `json:"mpUrl"`
+	MPToken         string `json:"mpToken"`
 }
 
 type settingsStore struct {
@@ -373,21 +374,23 @@ func newSettingsStore(path string) *settingsStore {
 	if strings.TrimSpace(data.P115TargetCID) == "" {
 		data.P115TargetCID = "0"
 	}
+	data.ScanConcurrency = clampScanConcurrency(data.ScanConcurrency)
 	return &settingsStore{path: path, data: data}
 }
 
 func settingsFromEnv() settings {
 	return settings{
-		EmbyURL:        os.Getenv("EMBY_URL"),
-		EmbyAPIKey:     os.Getenv("EMBY_API_KEY"),
-		EmbyUserID:     os.Getenv("EMBY_USER_ID"),
-		TMDBAPIKey:     os.Getenv("TMDB_API_KEY"),
-		PansouURL:      getenv("PANSOU_URL", defaultPanSouURL),
-		PansouUsername: os.Getenv("PANSOU_USERNAME"),
-		PansouPassword: os.Getenv("PANSOU_PASSWORD"),
-		PansouToken:    os.Getenv("PANSOU_TOKEN"),
-		P115Cookie:     os.Getenv("P115_COOKIE"),
-		P115TargetCID:  getenv("P115_TARGET_CID", "0"),
+		EmbyURL:         os.Getenv("EMBY_URL"),
+		EmbyAPIKey:      os.Getenv("EMBY_API_KEY"),
+		EmbyUserID:      os.Getenv("EMBY_USER_ID"),
+		TMDBAPIKey:      os.Getenv("TMDB_API_KEY"),
+		ScanConcurrency: clampScanConcurrency(getenvInt("SCAN_CONCURRENCY", 4)),
+		PansouURL:       getenv("PANSOU_URL", defaultPanSouURL),
+		PansouUsername:  os.Getenv("PANSOU_USERNAME"),
+		PansouPassword:  os.Getenv("PANSOU_PASSWORD"),
+		PansouToken:     os.Getenv("PANSOU_TOKEN"),
+		P115Cookie:      os.Getenv("P115_COOKIE"),
+		P115TargetCID:   getenv("P115_TARGET_CID", "0"),
 	}
 }
 
@@ -425,6 +428,9 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	setSecret("embyApiKey", func(v string) { next.EmbyAPIKey = v })
 	setPlain("embyUserId", func(v string) { next.EmbyUserID = v })
 	setSecret("tmdbApiKey", func(v string) { next.TMDBAPIKey = v })
+	setPlain("scanConcurrency", func(v string) {
+		next.ScanConcurrency = clampScanConcurrency(parseInt(v))
+	})
 	setPlain("pansouUrl", func(v string) {
 		if v == "" {
 			v = defaultPanSouURL
@@ -450,6 +456,7 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	if next.P115TargetCID == "" {
 		next.P115TargetCID = "0"
 	}
+	next.ScanConcurrency = clampScanConcurrency(next.ScanConcurrency)
 
 	s.data = next
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
@@ -461,18 +468,19 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 
 func maskSettings(s settings) map[string]any {
 	return map[string]any{
-		"embyUrl":        s.EmbyURL,
-		"embyApiKey":     maskSecret(s.EmbyAPIKey, 4),
-		"embyUserId":     s.EmbyUserID,
-		"tmdbApiKey":     maskSecret(s.TMDBAPIKey, 4),
-		"pansouUrl":      s.PansouURL,
-		"pansouUsername": s.PansouUsername,
-		"pansouPassword": maskSecret(s.PansouPassword, 4),
-		"pansouToken":    maskSecret(s.PansouToken, 4),
-		"p115Cookie":     maskSecret(s.P115Cookie, 12),
-		"p115TargetCid":  fallback(s.P115TargetCID, "0"),
-		"mpUrl":          s.MPUrl,
-		"mpToken":        maskSecret(s.MPToken, 4),
+		"embyUrl":         s.EmbyURL,
+		"embyApiKey":      maskSecret(s.EmbyAPIKey, 4),
+		"embyUserId":      s.EmbyUserID,
+		"tmdbApiKey":      maskSecret(s.TMDBAPIKey, 4),
+		"scanConcurrency": clampScanConcurrency(s.ScanConcurrency),
+		"pansouUrl":       s.PansouURL,
+		"pansouUsername":  s.PansouUsername,
+		"pansouPassword":  maskSecret(s.PansouPassword, 4),
+		"pansouToken":     maskSecret(s.PansouToken, 4),
+		"p115Cookie":      maskSecret(s.P115Cookie, 12),
+		"p115TargetCid":   fallback(s.P115TargetCID, "0"),
+		"mpUrl":           s.MPUrl,
+		"mpToken":         maskSecret(s.MPToken, 4),
 		"ready": map[string]bool{
 			"emby":   s.EmbyURL != "" && s.EmbyAPIKey != "",
 			"tmdb":   s.TMDBAPIKey != "",
@@ -980,8 +988,13 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		onProgress(processed, total, message, current, snapshot)
 	}
 	advanceProgress(0, "开始扫描媒体库...", "初始化")
+	seriesWorkers := clampScanConcurrency(s.ScanConcurrency)
+	movieWorkers := seriesWorkers
+	if movieWorkers > 2 {
+		movieWorkers = maxInt(2, seriesWorkers/2)
+	}
 
-	parallelFor(seriesItems, 6, func(series embyItem) {
+	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
 		fingerprint := seriesFingerprint(series, airedOnly)
 		if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
@@ -1019,7 +1032,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 
 		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID, func(page, count int) {
 			adjustTotal(1)
-			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集（第 %d 页，累计 %d 集）", title, page, count), title)
+			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
 		})
 		if err != nil {
 			unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
@@ -1149,7 +1162,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		}
 	})
 
-	parallelFor(movieItems, 5, func(movie embyItem) {
+	parallelFor(movieItems, movieWorkers, func(movie embyItem) {
 		title := fallback(movie.Name, "未知电影")
 		resolved, err := resolveTmdbMovie(s, movie)
 		mu.Lock()
@@ -2203,6 +2216,23 @@ func getenvInt(key string, fallbackValue int) int {
 		return value
 	}
 	return fallbackValue
+}
+
+func clampScanConcurrency(value int) int {
+	if value <= 0 {
+		return 4
+	}
+	if value > 16 {
+		return 16
+	}
+	return value
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func fallback(value, fallbackValue string) string {
