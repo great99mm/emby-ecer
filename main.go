@@ -285,12 +285,13 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/scan" && r.Method == http.MethodPost:
 		var body struct {
-			AiredOnly bool `json:"airedOnly"`
-			MaxSeries int  `json:"maxSeries"`
+			AiredOnly  bool `json:"airedOnly"`
+			MaxSeries  int  `json:"maxSeries"`
+			RecentOnly bool `json:"recentOnly"`
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
-		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, nil)
+		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
 			return
@@ -864,7 +865,7 @@ type unmatchedMedia struct {
 	Reason      string            `json:"reason"`
 }
 
-func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
+func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
 	}
@@ -952,6 +953,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 				"seriesScanned":        len(seriesItems),
 				"seriesCached":         cachedSeries,
 				"seriesRescanned":      rescannedSeries,
+				"scanMode":             scanModeLabel(recentOnly),
 				"movieTotal":           movieTotal,
 				"matchedSeries":        matchedSeries,
 				"unmatchedSeries":      len(unmatchedSeries),
@@ -997,6 +999,22 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
 		fingerprint := seriesFingerprint(series, airedOnly)
+		if recentOnly && !changedSince.IsZero() && !itemChangedSince(series, changedSince) {
+			if entry, ok := seriesScanCache.Get(series.ID); ok {
+				mu.Lock()
+				if entry.Matched {
+					matchedSeries++
+					cachedSeries++
+					missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
+				} else if entry.Unmatched != nil {
+					cachedSeries++
+					unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
+				}
+				mu.Unlock()
+				advanceProgress(3, fmt.Sprintf("《%s》不在最近变更范围，直接使用缓存", title), title)
+				return
+			}
+		}
 		if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
 			mu.Lock()
 			if entry.Matched {
@@ -1670,9 +1688,10 @@ func transfer115(s settings, body transferRequest) (transferResult, error) {
 
 func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type      string `json:"type"` // "scan" or "scan-search"
-		AiredOnly bool   `json:"airedOnly"`
-		MaxSeries int    `json:"maxSeries"`
+		Type       string `json:"type"` // "scan" or "scan-search"
+		AiredOnly  bool   `json:"airedOnly"`
+		MaxSeries  int    `json:"maxSeries"`
+		RecentOnly bool   `json:"recentOnly"`
 	}
 	body.AiredOnly = true
 	_ = readJSON(r, &body)
@@ -1696,7 +1715,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	j := jobMgr.create(body.Type)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries)
+	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly)
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
 
@@ -1715,12 +1734,20 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j)
 }
 
-func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
+func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool) {
+	changedSince := lastScanTime()
+	modeText := "全量增量模式"
+	if recentOnly {
+		modeText = "最近变更模式"
+		if changedSince.IsZero() {
+			modeText = "最近变更模式（首次将执行全量）"
+		}
+	}
 	jobMgr.update(id, func(j *job) {
 		j.Status = jobRunning
 		j.Progress = 1
 		j.Message = "开始扫描媒体库..."
-		j.Current = "初始化"
+		j.Current = modeText
 	})
 
 	scanProgressMax := 99
@@ -1748,7 +1775,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int) {
 		}
 	}()
 
-	result, err := scanLibrary(s, airedOnly, maxSeries, func(processed, total int, detail, current string, snapshot map[string]any) {
+	result, err := scanLibrary(s, airedOnly, maxSeries, recentOnly, changedSince, func(processed, total int, detail, current string, snapshot map[string]any) {
 		if total <= 0 {
 			total = 1
 		}
@@ -2686,6 +2713,51 @@ func (s *tmdbCacheStore) persistLocked() error {
 
 func scanResultPath() string {
 	return getenv("SCAN_RESULT_PATH", filepath.Join(filepath.Dir(getenv("CONFIG_PATH", filepath.Join("data", "config.json"))), "scan-result.json"))
+}
+
+func lastScanTime() time.Time {
+	result, err := loadScanResult()
+	if err != nil {
+		return time.Time{}
+	}
+	if value, ok := result["scannedAt"].(string); ok && strings.TrimSpace(value) != "" {
+		if t, err := time.Parse(time.RFC3339, value); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func scanModeLabel(recentOnly bool) string {
+	if recentOnly {
+		return "recent"
+	}
+	return "full"
+}
+
+func itemChangedSince(item embyItem, changedSince time.Time) bool {
+	if changedSince.IsZero() {
+		return true
+	}
+	for _, value := range []string{item.DateLastSaved, item.DateLastMediaAdded, item.PremiereDate} {
+		if t := parseFlexibleTime(value); !t.IsZero() && t.After(changedSince) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseFlexibleTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func saveScanResult(result map[string]any) error {

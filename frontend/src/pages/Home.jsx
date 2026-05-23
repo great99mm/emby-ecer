@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight } from 'lucide-react';
+import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, Database, RefreshCw } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
 
@@ -18,9 +18,9 @@ export default function Home() {
   const scannedAt = scan?.scannedAt;
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
-  const startJob = async (type) => {
+  const startJob = async (type, recentOnly = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly }) });
       setActiveJobId(data.jobId);
       setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
     } catch (err) {
@@ -34,7 +34,7 @@ export default function Home() {
       <ProgressBar />
 
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
         <StatCard
           label="缺集"
           value={summary.totalMissingEpisodes ?? '--'}
@@ -50,6 +50,16 @@ export default function Home() {
           label="电影"
           value={summary.movieTotal ?? '--'}
           icon={Film}
+        />
+        <StatCard
+          label="缓存命中"
+          value={summary.seriesCached ?? '--'}
+          icon={Database}
+        />
+        <StatCard
+          label="重扫剧集"
+          value={summary.seriesRescanned ?? '--'}
+          icon={RefreshCw}
         />
       </div>
 
@@ -70,16 +80,26 @@ export default function Home() {
         <div className="px-5 py-4 space-y-4">
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <Clock className="w-4 h-4" />
-            <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}</span>
+            <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}{summary.scanMode === 'recent' ? ' · 最近变更模式' : summary.scanMode === 'full' ? ' · 全量增量模式' : ''}</span>
           </div>
-          <button
-            onClick={() => startJob('scan')}
-            disabled={busy}
-            className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
-          >
-            <Radar className="w-4 h-4" />
-            扫描媒体库
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              onClick={() => startJob('scan', false)}
+              disabled={busy}
+              className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+            >
+              <Radar className="w-4 h-4" />
+              全量增量扫描
+            </button>
+            <button
+              onClick={() => startJob('scan', true)}
+              disabled={busy}
+              className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
+            >
+              <RefreshCw className="w-4 h-4" />
+              只扫最近变更
+            </button>
+          </div>
         </div>
       </div>
 

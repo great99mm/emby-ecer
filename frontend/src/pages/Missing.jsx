@@ -1,7 +1,7 @@
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, Database, RefreshCw } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -44,9 +44,9 @@ export default function Missing() {
   const totalOwned = groupList.reduce((s, g) => s + g.ownedEpisodes, 0);
   const healthPct = totalTMDB > 0 ? Math.round((totalOwned / totalTMDB) * 100) : 0;
 
-  const startScan = async () => {
+  const startScan = async (recentOnly = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly }) });
       setActiveJobId(data.jobId);
       setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
     } catch (err) {
@@ -62,7 +62,7 @@ export default function Missing() {
           <Inbox className="w-10 h-10 text-gray-300 mx-auto mb-3" />
           <h2 className="text-lg font-bold text-gray-900">暂无缺失列表</h2>
           <p className="mt-1 text-sm text-gray-500">请先扫描 Emby 媒体库</p>
-          <button onClick={startScan} disabled={busy} className="btn-primary mt-4 mx-auto flex items-center gap-2">
+          <button onClick={() => startScan(false)} disabled={busy} className="btn-primary mt-4 mx-auto flex items-center gap-2">
             <Radar className="w-4 h-4" /> 扫描媒体库
           </button>
         </div>
@@ -75,10 +75,12 @@ export default function Missing() {
       <ProgressBar />
 
       {/* Stats Row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
         <StatCard label="追踪剧集" value={groupList.length} icon={Tv} />
         <StatCard label="实有集数" value={totalOwned} icon={Film} />
         <StatCard label="缺失集数" value={totalMissing} icon={AlertTriangle} accent />
+        <StatCard label="缓存命中" value={summary.seriesCached ?? '--'} icon={Database} />
+        <StatCard label="重扫剧集" value={summary.seriesRescanned ?? '--'} icon={RefreshCw} />
         <div className="card flex flex-col justify-between">
           <div className="flex items-center gap-1.5 mb-1">
             <Activity className="w-4 h-4 text-primary-600" />
@@ -95,9 +97,14 @@ export default function Missing() {
       </div>
 
       {/* Scan Button */}
-      <button onClick={startScan} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2">
-        <Radar className="w-4 h-4" /> 重新扫描
-      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button onClick={() => startScan(false)} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2">
+          <Radar className="w-4 h-4" /> 全量增量扫描
+        </button>
+        <button onClick={() => startScan(true)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2">
+          <RefreshCw className="w-4 h-4" /> 只扫最近变更
+        </button>
+      </div>
 
       {/* Card Grid */}
       <div>
