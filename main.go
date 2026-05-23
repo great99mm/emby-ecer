@@ -27,12 +27,13 @@ import (
 const defaultPanSouURL = "https://so.252035.xyz"
 
 var (
-	appUsers   map[string]string
-	appUsersMu sync.RWMutex
-	jwtSecret  []byte
-	store      *settingsStore
-	tmdbCache  *tmdbCacheStore
-	httpCli    = &http.Client{Timeout: 45 * time.Second}
+	appUsers        map[string]string
+	appUsersMu      sync.RWMutex
+	jwtSecret       []byte
+	store           *settingsStore
+	tmdbCache       *tmdbCacheStore
+	seriesScanCache *seriesScanCacheStore
+	httpCli         = &http.Client{Timeout: 45 * time.Second}
 
 	pansouToken = struct {
 		sync.Mutex
@@ -143,6 +144,21 @@ type tmdbCacheStore struct {
 	data map[string]tmdbCacheEntry
 }
 
+type seriesScanCacheEntry struct {
+	Fingerprint string           `json:"fingerprint"`
+	Matched     bool             `json:"matched"`
+	Missing     []missingEpisode `json:"missing,omitempty"`
+	Unmatched   *unmatchedMedia  `json:"unmatched,omitempty"`
+	UpdatedAt   int64            `json:"updatedAt"`
+}
+
+type seriesScanCacheStore struct {
+	mu    sync.RWMutex
+	path  string
+	data  map[string]seriesScanCacheEntry
+	dirty bool
+}
+
 func main() {
 	configPath := getenv("CONFIG_PATH", filepath.Join("data", "config.json"))
 	// 先从持久化文件加载账号密码，没有则用环境变量
@@ -159,6 +175,7 @@ func main() {
 
 	store = newSettingsStore(configPath)
 	tmdbCache = newTMDBCacheStore(getenv("TMDB_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "tmdb-cache.json")), time.Duration(getenvInt("TMDB_CACHE_TTL_HOURS", 24))*time.Hour)
+	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
 
 	port := getenv("PORT", "3000")
 	server := &http.Server{
@@ -729,13 +746,16 @@ type embyItemsResp struct {
 }
 
 type embyItem struct {
-	ID             string            `json:"Id"`
-	Name           string            `json:"Name"`
-	Type           string            `json:"Type"`
-	OriginalTitle  string            `json:"OriginalTitle"`
-	ProductionYear int               `json:"ProductionYear"`
-	PremiereDate   string            `json:"PremiereDate"`
-	ProviderIDs    map[string]string `json:"ProviderIds"`
+	ID                 string            `json:"Id"`
+	Name               string            `json:"Name"`
+	Type               string            `json:"Type"`
+	OriginalTitle      string            `json:"OriginalTitle"`
+	ProductionYear     int               `json:"ProductionYear"`
+	PremiereDate       string            `json:"PremiereDate"`
+	DateLastSaved      string            `json:"DateLastSaved"`
+	DateLastMediaAdded string            `json:"DateLastMediaAdded"`
+	RecursiveItemCount int               `json:"RecursiveItemCount"`
+	ProviderIDs        map[string]string `json:"ProviderIds"`
 }
 
 type embyEpisodesResp struct {
@@ -846,6 +866,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 	movieItems := make([]embyItem, 0)
 	seriesTotal := 0
 	movieTotal := 0
+	fullSeriesScan := maxSeries <= 0
 
 	itemStart := 0
 	itemPageLimit := 1000
@@ -854,7 +875,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		if err := embyGet(s, itemRoute, map[string]string{
 			"Recursive":        "true",
 			"IncludeItemTypes": "Series,Movie",
-			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,Path",
+			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,DateLastSaved,DateLastMediaAdded,RecursiveItemCount,Path",
 			"SortBy":           "SortName",
 			"StartIndex":       strconv.Itoa(itemStart),
 			"Limit":            strconv.Itoa(itemPageLimit),
@@ -879,8 +900,16 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		itemStart += itemPageLimit
 	}
 	if maxSeries > 0 && maxSeries < len(seriesItems) {
+		fullSeriesScan = false
+	}
+	if maxSeries > 0 && maxSeries < len(seriesItems) {
 		seriesItems = seriesItems[:maxSeries]
 	}
+	defer func() {
+		if seriesScanCache != nil {
+			_ = seriesScanCache.Flush()
+		}
+	}()
 
 	var mu sync.Mutex
 	missing := make([]missingEpisode, 0)
@@ -888,8 +917,16 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 	unmatchedMovies := make([]unmatchedMedia, 0)
 	matchedSeries := 0
 	matchedMovies := 0
+	cachedSeries := 0
+	rescannedSeries := 0
 	totalWork := len(seriesItems)*3 + len(movieItems)
 	workDone := 0
+	currentSeriesIDs := map[string]bool{}
+	if fullSeriesScan {
+		for _, series := range seriesItems {
+			currentSeriesIDs[series.ID] = true
+		}
+	}
 	if totalWork <= 0 {
 		totalWork = 1
 	}
@@ -905,6 +942,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			"summary": map[string]any{
 				"seriesTotal":          seriesTotal,
 				"seriesScanned":        len(seriesItems),
+				"seriesCached":         cachedSeries,
+				"seriesRescanned":      rescannedSeries,
 				"movieTotal":           movieTotal,
 				"matchedSeries":        matchedSeries,
 				"unmatchedSeries":      len(unmatchedSeries),
@@ -944,11 +983,31 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 
 	parallelFor(seriesItems, 6, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
+		fingerprint := seriesFingerprint(series, airedOnly)
+		if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
+			mu.Lock()
+			if entry.Matched {
+				matchedSeries++
+				cachedSeries++
+				missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
+			} else if entry.Unmatched != nil {
+				cachedSeries++
+				unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
+			}
+			mu.Unlock()
+			advanceProgress(3, fmt.Sprintf("《%s》未变化，直接使用缓存", title), title)
+			return
+		}
+		mu.Lock()
+		rescannedSeries++
+		mu.Unlock()
 		resolved, err := resolveTmdbTV(s, series)
 		if err != nil || resolved == 0 {
+			unmatched := simpleMedia(series, "找不到 TMDB 剧集 ID")
 			mu.Lock()
-			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "找不到 TMDB 剧集 ID"))
+			unmatchedSeries = append(unmatchedSeries, unmatched)
 			mu.Unlock()
+			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: false, Unmatched: &unmatched, UpdatedAt: time.Now().Unix()})
 			advanceProgress(3, fmt.Sprintf("扫描《%s》时未找到 TMDB 剧集 ID", title), title)
 			return
 		}
@@ -959,12 +1018,15 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		embySeasons := map[int]bool{}
 
 		seriesEpisodes, err := loadSeriesEpisodes(s, itemRoute, series.ID, func(page, count int) {
+			adjustTotal(1)
 			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集（第 %d 页，累计 %d 集）", title, page, count), title)
 		})
 		if err != nil {
+			unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
 			mu.Lock()
-			unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error()))
+			unmatchedSeries = append(unmatchedSeries, unmatched)
 			mu.Unlock()
+			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: false, Unmatched: &unmatched, UpdatedAt: time.Now().Unix()})
 			advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
 			return
 		}
@@ -996,6 +1058,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		localMissing := make([]missingEpisode, 0)
 		totalTMDBCount := 0
 		ownedCount := 0
+		cacheable := true
 		seasonWork := 0
 		for _, season := range tv.Seasons {
 			if season.SeasonNumber > 0 && season.EpisodeCount > 0 {
@@ -1009,6 +1072,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 			}
 			var seasonDetail tmdbSeasonDetail
 			if err := tmdbGet(s, fmt.Sprintf("/tv/%d/season/%d", resolved, season.SeasonNumber), map[string]string{"language": "zh-CN"}, &seasonDetail); err != nil {
+				cacheable = false
 				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季读取失败，跳过", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 				continue
 			}
@@ -1080,6 +1144,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		matchedSeries++
 		missing = append(missing, localMissing...)
 		mu.Unlock()
+		if cacheable {
+			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: true, Missing: cloneMissingEpisodes(localMissing), UpdatedAt: time.Now().Unix()})
+		}
 	})
 
 	parallelFor(movieItems, 5, func(movie embyItem) {
@@ -1096,6 +1163,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, onProgress func(proc
 		mu.Unlock()
 		advanceProgress(1, fmt.Sprintf("已完成电影《%s》比对", title), title)
 	})
+	if fullSeriesScan {
+		seriesScanCache.Prune(currentSeriesIDs)
+	}
 	_, _, result := buildSnapshot()
 	return result, nil
 }
@@ -2304,6 +2374,41 @@ func parseInt(value string) int {
 	return n
 }
 
+func cloneMissingEpisodes(items []missingEpisode) []missingEpisode {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]missingEpisode, len(items))
+	copy(out, items)
+	return out
+}
+
+func cloneSeriesScanCacheEntry(entry seriesScanCacheEntry) seriesScanCacheEntry {
+	cloned := entry
+	cloned.Missing = cloneMissingEpisodes(entry.Missing)
+	if entry.Unmatched != nil {
+		value := *entry.Unmatched
+		cloned.Unmatched = &value
+	}
+	return cloned
+}
+
+func seriesFingerprint(item embyItem, airedOnly bool) string {
+	return strings.Join([]string{
+		strings.TrimSpace(item.ID),
+		strings.TrimSpace(item.Name),
+		strings.TrimSpace(item.OriginalTitle),
+		strconv.Itoa(effectiveYear(item)),
+		strings.TrimSpace(item.DateLastSaved),
+		strings.TrimSpace(item.DateLastMediaAdded),
+		strconv.Itoa(item.RecursiveItemCount),
+		strconv.FormatBool(airedOnly),
+		providerID(item.ProviderIDs, "tmdb"),
+		providerID(item.ProviderIDs, "tvdb"),
+		providerID(item.ProviderIDs, "imdb"),
+	}, "|")
+}
+
 func simpleMedia(item embyItem, reason string) unmatchedMedia {
 	return unmatchedMedia{ID: item.ID, Name: item.Name, Year: effectiveYear(item), Type: item.Type, ProviderIDs: item.ProviderIDs, Reason: reason}
 }
@@ -2415,6 +2520,83 @@ func newTMDBCacheStore(path string, ttl time.Duration) *tmdbCacheStore {
 	}
 	store.cleanupExpired()
 	return store
+}
+
+func newSeriesScanCacheStore(path string) *seriesScanCacheStore {
+	store := &seriesScanCacheStore{path: path, data: map[string]seriesScanCacheEntry{}}
+	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &store.data)
+	}
+	return store
+}
+
+func (s *seriesScanCacheStore) Get(key string) (seriesScanCacheEntry, bool) {
+	if s == nil {
+		return seriesScanCacheEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.data[key]
+	if !ok {
+		return seriesScanCacheEntry{}, false
+	}
+	return cloneSeriesScanCacheEntry(entry), true
+}
+
+func (s *seriesScanCacheStore) Set(key string, entry seriesScanCacheEntry) {
+	if s == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = cloneSeriesScanCacheEntry(entry)
+	s.dirty = true
+}
+
+func (s *seriesScanCacheStore) Prune(valid map[string]bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for key := range s.data {
+		if !valid[key] {
+			delete(s.data, key)
+			changed = true
+		}
+	}
+	if changed {
+		s.dirty = true
+	}
+	_ = s.flushLocked()
+}
+
+func (s *seriesScanCacheStore) Flush() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+func (s *seriesScanCacheStore) flushLocked() error {
+	if !s.dirty {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(s.data, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(s.path, raw, 0o600); err != nil {
+		return err
+	}
+	s.dirty = false
+	return nil
 }
 
 func (s *tmdbCacheStore) Get(key string, out any) bool {
