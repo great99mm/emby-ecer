@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultPanSouURL       = "https://so.252035.xyz"
-	seriesScanCacheVersion = "series-scan-v2"
+	seriesScanCacheVersion = "series-scan-v3"
 )
 
 var (
@@ -1284,16 +1284,21 @@ func resolveTmdbTV(s settings, series embyItem) (int, error) {
 	}
 	// 4. Title search (strict: title + year must match)
 	for _, keyword := range tvSearchQueries(series) {
-		query := map[string]string{"language": "zh-CN", "query": keyword}
-		if effectiveYear(series) > 0 {
-			query["first_air_date_year"] = strconv.Itoa(effectiveYear(series))
-		}
-		var resp tmdbSearchResp
-		if err := tmdbGet(s, "/search/tv", query, &resp); err != nil {
-			return 0, err
-		}
-		if best := bestTMDBTVMatch(series, resp.Results); best != nil {
-			return best.ID, nil
+		for _, withYear := range []bool{true, false} {
+			query := map[string]string{"language": "zh-CN", "query": keyword}
+			if withYear && effectiveYear(series) > 0 {
+				query["first_air_date_year"] = strconv.Itoa(effectiveYear(series))
+			}
+			var resp tmdbSearchResp
+			if err := tmdbGet(s, "/search/tv", query, &resp); err != nil {
+				return 0, err
+			}
+			if best := bestTMDBTVMatch(series, resp.Results); best != nil {
+				return best.ID, nil
+			}
+			if effectiveYear(series) <= 0 {
+				break
+			}
 		}
 	}
 	return 0, nil
@@ -2467,6 +2472,9 @@ func titleContains(a, b string) bool {
 
 func tvSearchQueries(series embyItem) []string {
 	queries := []string{series.Name, cleanSeasonSuffix(series.Name), series.OriginalTitle, cleanSeasonSuffix(series.OriginalTitle)}
+	for _, query := range append([]string{}, queries...) {
+		queries = append(queries, knownTitleAliases(query)...)
+	}
 	out := make([]string, 0, len(queries))
 	for _, query := range queries {
 		query = strings.TrimSpace(query)
@@ -2475,6 +2483,17 @@ func tvSearchQueries(series embyItem) []string {
 		}
 	}
 	return out
+}
+
+func knownTitleAliases(value string) []string {
+	key := normalizeTitle(value)
+	aliases := map[string][]string{
+		"权欲第四章武力":       {"Power Book IV: Force"},
+		"欢迎来到实力至上主义的教室": {"ようこそ実力至上主義の教室へ", "Classroom of the Elite"},
+		"邻家的天使同学":       {"关于邻家的天使大人不知不觉把我惯成了废人", "The Angel Next Door Spoils Me Rotten"},
+		"犯罪记录":          {"Criminal Record"},
+	}
+	return aliases[key]
 }
 
 func cleanSeasonSuffix(value string) string {
