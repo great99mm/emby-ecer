@@ -7,7 +7,7 @@ import SearchResults from './SearchResults';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
 
-export default function MissingCard({ group }) {
+export default function MissingCard({ group, selectable = false, selected = false, onToggleSelect, onIgnore }) {
   const seriesKey = `series:${group.tmdbId || group.key}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -120,8 +120,13 @@ export default function MissingCard({ group }) {
   // Poster Card
   return (
     <>
-      <div onClick={() => setOpen(true)} className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow">
+      <div onClick={() => selectable ? onToggleSelect?.(group) : setOpen(true)} className={`bg-white rounded-lg border shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow ${selected ? 'border-primary-500 ring-2 ring-primary-100' : 'border-gray-200'}`}>
         <div className="relative aspect-[2/3] bg-gray-100">
+          {selectable && (
+            <div className="absolute left-2 top-2 z-10 h-5 w-5 rounded border-2 border-white bg-white/90 shadow flex items-center justify-center">
+              {selected && <div className="h-2.5 w-2.5 rounded-sm bg-primary-600" />}
+            </div>
+          )}
           {group.posterPath ? (
             <img src={TMDB_IMG + group.posterPath} className="w-full h-full object-cover" loading="lazy" alt="" />
           ) : (
@@ -145,7 +150,12 @@ export default function MissingCard({ group }) {
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{group.title}</p>
-          <p className="text-[10px] text-red-500 mt-0.5">缺{missingEps}集</p>
+          <div className="mt-0.5 flex items-center justify-between gap-2">
+            <p className="text-[10px] text-red-500">缺{missingEps}集</p>
+            {!selectable && onIgnore && (
+              <button type="button" onClick={(e) => { e.stopPropagation(); onIgnore(group); }} className="text-[10px] font-bold text-gray-400 hover:text-red-500">忽略</button>
+            )}
+          </div>
         </div>
       </div>
 

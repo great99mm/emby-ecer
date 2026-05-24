@@ -96,16 +96,7 @@ export default function Home() {
           </button>
           <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
             <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
-            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => startJob('scan', true, false)}
-                disabled={busy}
-                className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
-              >
-                <RefreshCw className="w-4 h-4" />
-                只扫最近变更
-              </button>
+            <div className="mt-3 grid grid-cols-1 gap-3">
               <button
                 type="button"
                 onClick={() => startJob('scan', false, true)}
@@ -113,7 +104,7 @@ export default function Home() {
                 className="btn-outline w-full flex items-center justify-center gap-2 text-sm text-red-600 border-red-200 hover:bg-red-50"
               >
                 <Trash2 className="w-4 h-4" />
-                清空本地缓存后扫描
+                清空 TMDB 缓存后扫描
               </button>
             </div>
           </details>

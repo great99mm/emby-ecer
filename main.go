@@ -193,6 +193,11 @@ type seriesScanCacheEntry struct {
 	Matched     bool             `json:"matched"`
 	Missing     []missingEpisode `json:"missing,omitempty"`
 	Unmatched   *unmatchedMedia  `json:"unmatched,omitempty"`
+	Name        string           `json:"name,omitempty"`
+	TMDBID      int              `json:"tmdbId,omitempty"`
+	TMDBName    string           `json:"tmdbName,omitempty"`
+	TMDBYear    string           `json:"tmdbYear,omitempty"`
+	Manual      bool             `json:"manual,omitempty"`
 	Complete    bool             `json:"complete,omitempty"`
 	UpdatedAt   int64            `json:"updatedAt"`
 }
@@ -329,18 +334,19 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/scan" && r.Method == http.MethodPost:
 		var body struct {
-			AiredOnly  bool   `json:"airedOnly"`
-			MaxSeries  int    `json:"maxSeries"`
-			RecentOnly bool   `json:"recentOnly"`
-			ClearCache bool   `json:"clearCache"`
-			SeriesID   string `json:"seriesId"`
+			AiredOnly  bool     `json:"airedOnly"`
+			MaxSeries  int      `json:"maxSeries"`
+			RecentOnly bool     `json:"recentOnly"`
+			ClearCache bool     `json:"clearCache"`
+			SeriesID   string   `json:"seriesId"`
+			SeriesIDs  []string `json:"seriesIds"`
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
 		if body.ClearCache {
-			clearLocalScanCaches()
+			clearTMDBCache()
 		}
-		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), strings.TrimSpace(body.SeriesID), nil)
+		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), joinSeriesIDs(body.SeriesID, body.SeriesIDs), nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
 			return
@@ -392,6 +398,15 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+
+	case r.URL.Path == "/api/exemptions" && r.Method == http.MethodGet:
+		handleGetExemptions(w, r)
+
+	case r.URL.Path == "/api/exemptions" && r.Method == http.MethodPost:
+		handleAddExemptions(w, r)
+
+	case r.URL.Path == "/api/exemptions/delete" && r.Method == http.MethodPost:
+		handleDeleteExemptions(w, r)
 
 	case r.URL.Path == "/api/jobs" && r.Method == http.MethodPost:
 		handleCreateJob(w, r)
@@ -949,7 +964,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	seriesTotal := 0
 	movieTotal := 0
 	onlySeriesID = strings.TrimSpace(onlySeriesID)
-	fullSeriesScan := maxSeries <= 0 && onlySeriesID == ""
+	onlySeriesIDs := parseSeriesIDSet(onlySeriesID)
+	fullSeriesScan := maxSeries <= 0 && len(onlySeriesIDs) == 0
 
 	itemStart := 0
 	itemPageLimit := 1000
@@ -970,7 +986,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			switch item.Type {
 			case "Series":
 				seriesTotal++
-				if onlySeriesID != "" && item.ID != onlySeriesID {
+				if len(onlySeriesIDs) > 0 && !onlySeriesIDs[item.ID] {
 					continue
 				}
 				seriesItems = append(seriesItems, item)
@@ -1098,15 +1114,21 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
-		forceRescanSeries := onlySeriesID != ""
+		forceRescanSeries := len(onlySeriesIDs) > 0 || recentOnly
 		if !forceRescanSeries {
 			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
 				mu.Lock()
 				matchedSeries++
 				cachedSeries++
 				mu.Unlock()
-				addSkipped(series, "complete-archive", "上次完整扫描确认一个都不缺，跳过本次扫描")
-				advanceProgress(3, fmt.Sprintf("《%s》在完整存档中，跳过扫描", title), title)
+				action := "complete-archive"
+				reason := "上次完整扫描确认一个都不缺，跳过本次扫描"
+				if entry.Manual {
+					action = "manual-ignore"
+					reason = "已手动加入免检名单，跳过本次扫描"
+				}
+				addSkipped(series, action, reason)
+				advanceProgress(3, fmt.Sprintf("《%s》在免检名单中，跳过扫描", title), title)
 				return
 			}
 		}
@@ -1280,7 +1302,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		missing = append(missing, localMissing...)
 		mu.Unlock()
 		if cacheable && len(localMissing) == 0 {
-			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Matched: true, Complete: true, UpdatedAt: time.Now().Unix()})
+			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Matched: true, Complete: true, Name: series.Name, TMDBID: resolved, TMDBName: officialTitle, TMDBYear: firstYear(tv.FirstAirDate), UpdatedAt: time.Now().Unix()})
 		} else {
 			seriesScanCache.Delete(series.ID)
 		}
@@ -1786,12 +1808,13 @@ func transfer115(s settings, body transferRequest) (transferResult, error) {
 
 func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type       string `json:"type"` // "scan" or "scan-search"
-		AiredOnly  bool   `json:"airedOnly"`
-		MaxSeries  int    `json:"maxSeries"`
-		RecentOnly bool   `json:"recentOnly"`
-		ClearCache bool   `json:"clearCache"`
-		SeriesID   string `json:"seriesId"`
+		Type       string   `json:"type"` // "scan" or "scan-search"
+		AiredOnly  bool     `json:"airedOnly"`
+		MaxSeries  int      `json:"maxSeries"`
+		RecentOnly bool     `json:"recentOnly"`
+		ClearCache bool     `json:"clearCache"`
+		SeriesID   string   `json:"seriesId"`
+		SeriesIDs  []string `json:"seriesIds"`
 	}
 	body.AiredOnly = true
 	_ = readJSON(r, &body)
@@ -1816,7 +1839,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	j := jobMgr.create(body.Type)
 	activateScanJob(j.ID)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache, strings.TrimSpace(body.SeriesID))
+	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache, joinSeriesIDs(body.SeriesID, body.SeriesIDs))
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
 
@@ -1850,6 +1873,74 @@ func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
+func handleGetExemptions(w http.ResponseWriter, r *http.Request) {
+	manual, complete := exemptionLists()
+	writeJSON(w, http.StatusOK, map[string]any{"manual": manual, "complete": complete})
+}
+
+func handleAddExemptions(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Items []seriesExemptionInput `json:"items"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	count := 0
+	ignoredIDs := make([]string, 0, len(body.Items))
+	for _, item := range body.Items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		seriesScanCache.Set(id, seriesScanCacheEntry{
+			Matched:   true,
+			Complete:  true,
+			Manual:    true,
+			Name:      strings.TrimSpace(item.Name),
+			TMDBID:    item.TMDBID,
+			TMDBName:  strings.TrimSpace(item.TMDBName),
+			TMDBYear:  strings.TrimSpace(item.TMDBYear),
+			UpdatedAt: time.Now().Unix(),
+		})
+		count++
+		ignoredIDs = append(ignoredIDs, id)
+	}
+	_ = seriesScanCache.Flush()
+	removeSeriesFromSavedScanResult(ignoredIDs)
+	manual, complete := exemptionLists()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": count, "manual": manual, "complete": complete})
+}
+
+func handleDeleteExemptions(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	count := 0
+	for _, id := range body.IDs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		seriesScanCache.Delete(id)
+		count++
+	}
+	_ = seriesScanCache.Flush()
+	manual, complete := exemptionLists()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": count, "manual": manual, "complete": complete})
+}
+
+type seriesExemptionInput struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	TMDBID   int    `json:"tmdbId"`
+	TMDBName string `json:"tmdbName"`
+	TMDBYear string `json:"tmdbYear"`
+}
+
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool, seriesID string) {
 	defer finishActiveScanJob(id)
 	update := func(fn func(*job)) bool {
@@ -1875,10 +1966,10 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	})
 	if clearCache {
 		update(func(j *job) {
-			j.Message = "正在清空本地缓存..."
-			j.Current = "清空缓存"
+			j.Message = "正在清空 TMDB 缓存..."
+			j.Current = "清空 TMDB 缓存"
 		})
-		clearLocalScanCaches()
+		clearTMDBCache()
 	}
 
 	scanProgressMax := 99
@@ -1939,7 +2030,9 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		return
 	}
 	if strings.TrimSpace(seriesID) != "" {
-		result = mergeSingleSeriesScanResult(seriesID, result)
+		for id := range parseSeriesIDSet(seriesID) {
+			result = mergeSingleSeriesScanResult(id, result)
+		}
 	}
 	_ = saveScanResult(result)
 	missingCount := 0
@@ -2967,10 +3060,7 @@ func lastScanTime() time.Time {
 	return time.Time{}
 }
 
-func clearLocalScanCaches() {
-	if seriesScanCache != nil {
-		_ = seriesScanCache.Clear()
-	}
+func clearTMDBCache() {
 	if tmdbCache != nil {
 		_ = tmdbCache.Clear()
 	}
@@ -3055,6 +3145,37 @@ func mergeSingleSeriesScanResult(seriesID string, fresh map[string]any) map[stri
 	return previous
 }
 
+func removeSeriesFromSavedScanResult(seriesIDs []string) {
+	if len(seriesIDs) == 0 {
+		return
+	}
+	set := map[string]bool{}
+	for _, id := range seriesIDs {
+		if strings.TrimSpace(id) != "" {
+			set[strings.TrimSpace(id)] = true
+		}
+	}
+	if len(set) == 0 {
+		return
+	}
+	result, err := loadScanResult()
+	if err != nil || result == nil {
+		return
+	}
+	filtered := make([]any, 0)
+	for _, item := range anySlice(result["missing"]) {
+		if set[missingItemSeriesID(item)] {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	result["missing"] = filtered
+	if summary, ok := result["summary"].(map[string]any); ok {
+		summary["totalMissingEpisodes"] = len(filtered)
+	}
+	_ = saveScanResult(result)
+}
+
 func anySlice(value any) []any {
 	switch items := value.(type) {
 	case []any:
@@ -3079,6 +3200,64 @@ func missingItemSeriesID(item any) string {
 	default:
 		return ""
 	}
+}
+
+type seriesExemptionView struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	TMDBID    int    `json:"tmdbId,omitempty"`
+	TMDBName  string `json:"tmdbName,omitempty"`
+	TMDBYear  string `json:"tmdbYear,omitempty"`
+	Manual    bool   `json:"manual"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+func exemptionLists() ([]seriesExemptionView, []seriesExemptionView) {
+	manual := make([]seriesExemptionView, 0)
+	complete := make([]seriesExemptionView, 0)
+	if seriesScanCache == nil {
+		return manual, complete
+	}
+	seriesScanCache.mu.RLock()
+	defer seriesScanCache.mu.RUnlock()
+	for id, entry := range seriesScanCache.data {
+		if !entry.Complete {
+			continue
+		}
+		item := seriesExemptionView{ID: id, Name: fallback(entry.Name, id), TMDBID: entry.TMDBID, TMDBName: entry.TMDBName, TMDBYear: entry.TMDBYear, Manual: entry.Manual, UpdatedAt: entry.UpdatedAt}
+		if entry.Manual {
+			manual = append(manual, item)
+		} else {
+			complete = append(complete, item)
+		}
+	}
+	sort.Slice(manual, func(i, j int) bool { return manual[i].Name < manual[j].Name })
+	sort.Slice(complete, func(i, j int) bool { return complete[i].Name < complete[j].Name })
+	return manual, complete
+}
+
+func joinSeriesIDs(primary string, ids []string) string {
+	parts := make([]string, 0, len(ids)+1)
+	if strings.TrimSpace(primary) != "" {
+		parts = append(parts, strings.TrimSpace(primary))
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			parts = append(parts, strings.TrimSpace(id))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseSeriesIDSet(value string) map[string]bool {
+	set := map[string]bool{}
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '，' || r == '\n' || r == '\t' || r == ' ' }) {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			set[part] = true
+		}
+	}
+	return set
 }
 
 func loadScanResult() (map[string]any, error) {

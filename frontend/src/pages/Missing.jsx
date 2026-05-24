@@ -1,7 +1,8 @@
+import { useEffect, useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2 } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2, CheckSquare, Square, ShieldCheck } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -12,7 +13,13 @@ export default function Missing() {
   const jobStatus = useStore(s => s.jobStatus);
   const setActiveJobId = useStore(s => s.setActiveJobId);
   const setJobStatus = useStore(s => s.setJobStatus);
+  const setScan = useStore(s => s.setScan);
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState({});
+  const [exemptions, setExemptions] = useState({ manual: [], complete: [] });
+  const [exemptionTab, setExemptionTab] = useState('manual');
+  const [selectedExemptions, setSelectedExemptions] = useState({});
 
   const summary = scan?.summary || {};
   const diagnostics = scan?.diagnostics || {};
@@ -29,6 +36,7 @@ export default function Missing() {
         key,
         title: item.officialTitle || item.embyTitle,
         tmdbId: item.tmdbId,
+        tmdbYear: item.tmdbMatchYear,
         embySeriesId: item.embySeriesId,
         posterPath: item.posterPath,
         totalEpisodes: item.totalEpisodes || 0,
@@ -59,6 +67,88 @@ export default function Missing() {
     }
   };
 
+  const loadExemptions = async () => {
+    try {
+      const data = await api('/api/exemptions');
+      setExemptions({ manual: data.manual || [], complete: data.complete || [] });
+    } catch {}
+  };
+
+  useEffect(() => { loadExemptions(); }, []);
+
+  const toExemptionItem = (group) => ({
+    id: group.embySeriesId,
+    name: group.title,
+    tmdbId: group.tmdbId || 0,
+    tmdbName: group.title,
+    tmdbYear: group.tmdbYear || '',
+  });
+
+  const toggleGroup = (group) => {
+    if (!group.embySeriesId) return;
+    setSelected(prev => {
+      const next = { ...prev };
+      if (next[group.embySeriesId]) delete next[group.embySeriesId];
+      else next[group.embySeriesId] = group;
+      return next;
+    });
+  };
+
+  const selectedGroups = Object.values(selected);
+
+  const startSelectedScan = async () => {
+    const ids = selectedGroups.map(g => g.embySeriesId).filter(Boolean);
+    if (!ids.length) return toast.error('请先选择剧集');
+    try {
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, seriesIds: ids }) });
+      setActiveJobId(data.jobId);
+      setJobStatus({ status: 'running', progress: 0, message: `正在单独扫描 ${ids.length} 部剧...` });
+      setSelectMode(false);
+      setSelected({});
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const addGroupsToIgnore = async (groupsToIgnore) => {
+    const items = groupsToIgnore.filter(g => g.embySeriesId).map(toExemptionItem);
+    if (!items.length) return toast.error('没有可加入忽略的剧集');
+    if (!window.confirm(`确认将 ${items.length} 部剧加入免检名单？以后扫描会跳过这些剧。`)) return;
+    try {
+      const data = await api('/api/exemptions', { method: 'POST', body: JSON.stringify({ items }) });
+      setExemptions({ manual: data.manual || [], complete: data.complete || [] });
+      const ignored = new Set(items.map(i => i.id));
+      if (scan) setScan({ ...scan, missing: (scan.missing || []).filter(item => !ignored.has(item.embySeriesId)) });
+      setSelected({});
+      setSelectMode(false);
+      toast.success('已加入免检名单');
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const selectedExemptionItems = Object.values(selectedExemptions);
+  const toggleExemption = (item) => {
+    setSelectedExemptions(prev => {
+      const next = { ...prev };
+      if (next[item.id]) delete next[item.id];
+      else next[item.id] = item;
+      return next;
+    });
+  };
+  const deleteExemptions = async (items) => {
+    const ids = items.map(i => i.id).filter(Boolean);
+    if (!ids.length) return;
+    try {
+      const data = await api('/api/exemptions/delete', { method: 'POST', body: JSON.stringify({ ids }) });
+      setExemptions({ manual: data.manual || [], complete: data.complete || [] });
+      setSelectedExemptions({});
+      toast.success('已从免检名单移除');
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
   if (!missing.length) {
     return (
       <div className="space-y-6">
@@ -73,11 +163,8 @@ export default function Missing() {
           <details className="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-left">
             <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
             <div className="mt-3 grid grid-cols-1 gap-3">
-              <button type="button" onClick={() => startScan(true, false)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2">
-                <RefreshCw className="w-4 h-4" /> 只扫最近变更
-              </button>
               <button type="button" onClick={() => startScan(false, true)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2 text-red-600 border-red-200 hover:bg-red-50">
-                <Trash2 className="w-4 h-4" /> 清空本地缓存后扫描
+                <Trash2 className="w-4 h-4" /> 清空 TMDB 缓存后扫描
               </button>
             </div>
           </details>
@@ -118,15 +205,50 @@ export default function Missing() {
       </button>
       <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
         <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
-        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <button type="button" onClick={() => startScan(true, false)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2">
-            <RefreshCw className="w-4 h-4" /> 只扫最近变更
-          </button>
+        <div className="mt-3 grid grid-cols-1 gap-3">
           <button type="button" onClick={() => startScan(false, true)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2 text-red-600 border-red-200 hover:bg-red-50">
-            <Trash2 className="w-4 h-4" /> 清空本地缓存后扫描
+            <Trash2 className="w-4 h-4" /> 清空 TMDB 缓存后扫描
           </button>
         </div>
       </details>
+
+      <div className="card space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-gray-900">免检名单</h2>
+            <p className="mt-1 text-xs text-gray-400">手动忽略和完结归档的剧集，扫描时会跳过。</p>
+          </div>
+          <ShieldCheck className="h-5 w-5 text-emerald-500" />
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => { setExemptionTab('manual'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'manual' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>手动忽略 · {exemptions.manual.length}</button>
+          <button type="button" onClick={() => { setExemptionTab('complete'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'complete' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>完结归档 · {exemptions.complete.length}</button>
+        </div>
+        {selectedExemptionItems.length > 0 && (
+          <div className="flex items-center justify-between rounded-lg border border-red-100 bg-red-50 px-3 py-2">
+            <span className="text-xs font-bold text-red-700">已选 {selectedExemptionItems.length} 项</span>
+            <button type="button" onClick={() => deleteExemptions(selectedExemptionItems)} className="text-xs font-bold text-red-600 hover:text-red-700">批量移除</button>
+          </div>
+        )}
+        <div className="max-h-60 overflow-y-auto space-y-2">
+          {(exemptionTab === 'manual' ? exemptions.manual : exemptions.complete).length === 0 ? (
+            <p className="text-sm text-gray-500 py-3">当前名单为空。</p>
+          ) : (
+            (exemptionTab === 'manual' ? exemptions.manual : exemptions.complete).map(item => (
+              <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                <button type="button" onClick={() => toggleExemption(item)} className="shrink-0 text-gray-400 hover:text-primary-600">
+                  {selectedExemptions[item.id] ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                </button>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
+                  <p className="text-xs text-gray-400">{item.tmdbName || item.tmdbId || '无 TMDB 信息'}</p>
+                </div>
+                <button type="button" onClick={() => deleteExemptions([item])} className="shrink-0 text-xs font-bold text-red-500 hover:text-red-600">移除</button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
 
       <details className="card space-y-4">
         <summary className="cursor-pointer list-none">
@@ -227,10 +349,24 @@ export default function Missing() {
 
       {/* Card Grid */}
       <div>
-        <p className="text-xs font-bold uppercase tracking-widest text-gray-400 mb-3">缺集管理 · {groupList.length} 部剧</p>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-bold uppercase tracking-widest text-gray-400">缺集管理 · {groupList.length} 部剧</p>
+          <button type="button" onClick={() => { setSelectMode(v => !v); setSelected({}); }} className="btn-outline flex items-center gap-2 px-3 py-1.5 text-xs">
+            {selectMode ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />} {selectMode ? '退出多选' : '多选'}
+          </button>
+        </div>
+        {selectMode && (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-primary-100 bg-primary-50 px-3 py-2">
+            <span className="text-xs font-bold text-primary-700">已选 {selectedGroups.length} 部剧</span>
+            <div className="flex gap-2">
+              <button type="button" onClick={startSelectedScan} disabled={busy || selectedGroups.length === 0} className="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-40">单独扫描</button>
+              <button type="button" onClick={() => addGroupsToIgnore(selectedGroups)} disabled={selectedGroups.length === 0} className="rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-bold text-red-600 disabled:opacity-40">加入免检</button>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
           {groupList.map(group => (
-            <MissingCard key={group.key} group={group} />
+            <MissingCard key={group.key} group={group} selectable={selectMode} selected={!!selected[group.embySeriesId]} onToggleSelect={toggleGroup} onIgnore={(g) => addGroupsToIgnore([g])} />
           ))}
         </div>
       </div>
