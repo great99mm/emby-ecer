@@ -26,7 +26,7 @@ import (
 
 const (
 	defaultPanSouURL       = "https://so.252035.xyz"
-	seriesScanCacheVersion = "series-scan-v5"
+	seriesScanCacheVersion = "complete-series-archive-v1"
 )
 
 var (
@@ -193,6 +193,7 @@ type seriesScanCacheEntry struct {
 	Matched     bool             `json:"matched"`
 	Missing     []missingEpisode `json:"missing,omitempty"`
 	Unmatched   *unmatchedMedia  `json:"unmatched,omitempty"`
+	Complete    bool             `json:"complete,omitempty"`
 	UpdatedAt   int64            `json:"updatedAt"`
 }
 
@@ -1097,39 +1098,15 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
-		fingerprint := seriesFingerprint(series, airedOnly)
 		forceRescanSeries := onlySeriesID != ""
-		if !forceRescanSeries && recentOnly && !changedSince.IsZero() && !itemChangedSince(series, changedSince) {
-			if entry, ok := seriesScanCache.Get(series.ID); ok {
-				mu.Lock()
-				if entry.Matched {
-					matchedSeries++
-					cachedSeries++
-					missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
-				} else if entry.Unmatched != nil {
-					cachedSeries++
-					unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
-				}
-				mu.Unlock()
-				addSkipped(series, "cache", "不在最近变更范围，直接使用缓存")
-				advanceProgress(3, fmt.Sprintf("《%s》不在最近变更范围，直接使用缓存", title), title)
-				return
-			}
-		}
 		if !forceRescanSeries {
-			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
+			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
 				mu.Lock()
-				if entry.Matched {
-					matchedSeries++
-					cachedSeries++
-					missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
-				} else if entry.Unmatched != nil {
-					cachedSeries++
-					unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
-				}
+				matchedSeries++
+				cachedSeries++
 				mu.Unlock()
-				addSkipped(series, "cache", "指纹未变化，直接使用缓存")
-				advanceProgress(3, fmt.Sprintf("《%s》未变化，直接使用缓存", title), title)
+				addSkipped(series, "complete-archive", "上次完整扫描确认一个都不缺，跳过本次扫描")
+				advanceProgress(3, fmt.Sprintf("《%s》在完整存档中，跳过扫描", title), title)
 				return
 			}
 		}
@@ -1142,7 +1119,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, unmatched)
 			mu.Unlock()
-			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: false, Unmatched: &unmatched, UpdatedAt: time.Now().Unix()})
+			seriesScanCache.Delete(series.ID)
 			advanceProgress(3, fmt.Sprintf("扫描《%s》时未找到 TMDB 剧集 ID", title), title)
 			return
 		}
@@ -1161,7 +1138,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			mu.Lock()
 			unmatchedSeries = append(unmatchedSeries, unmatched)
 			mu.Unlock()
-			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: false, Unmatched: &unmatched, UpdatedAt: time.Now().Unix()})
+			seriesScanCache.Delete(series.ID)
 			advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
 			return
 		}
@@ -1302,8 +1279,10 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		matchedSeries++
 		missing = append(missing, localMissing...)
 		mu.Unlock()
-		if cacheable {
-			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Fingerprint: fingerprint, Matched: true, Missing: cloneMissingEpisodes(localMissing), UpdatedAt: time.Now().Unix()})
+		if cacheable && len(localMissing) == 0 {
+			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Matched: true, Complete: true, UpdatedAt: time.Now().Unix()})
+		} else {
+			seriesScanCache.Delete(series.ID)
 		}
 	})
 
@@ -2835,6 +2814,18 @@ func (s *seriesScanCacheStore) Set(key string, entry seriesScanCacheEntry) {
 	defer s.mu.Unlock()
 	s.data[key] = cloneSeriesScanCacheEntry(entry)
 	s.dirty = true
+}
+
+func (s *seriesScanCacheStore) Delete(key string) {
+	if s == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.data[key]; ok {
+		delete(s.data, key)
+		s.dirty = true
+	}
 }
 
 func (s *seriesScanCacheStore) Prune(valid map[string]bool) {
