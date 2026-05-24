@@ -1937,11 +1937,12 @@ func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := jobMgr.get(id)
-	if j == nil || (j.Status != jobRunning && j.Status != jobPending) {
-		finishActiveScanJob(id)
+	if j == nil {
+		// 任务可能还在初始化中，不要误清活跃标记
 		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
 		return
 	}
+	// 返回任务本身，即使已完成/出错也返回，让前端自行决定展示
 	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
@@ -2014,7 +2015,18 @@ type seriesExemptionInput struct {
 }
 
 func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool, seriesID string) {
-	defer finishActiveScanJob(id)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("runJob panic: %v", r)
+			jobMgr.update(id, func(j *job) {
+				j.Status = jobError
+				j.Error = fmt.Sprintf("内部错误: %v", r)
+				j.Message = "扫描异常中断"
+				j.Current = "异常中断"
+			})
+		}
+		finishActiveScanJob(id)
+	}()
 	update := func(fn func(*job)) bool {
 		if !isActiveScanJob(id) {
 			return false

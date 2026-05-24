@@ -33,9 +33,9 @@ function JobPoller() {
     }
     if (j.status === 'done') {
       if (j.result?.searched) applySearchResults(j.result.searched);
-      clearJob();
+      // 不自动清除，让用户手动关闭
     } else if (j.status === 'error') {
-      clearJob();
+      // 不自动清除，让用户手动关闭
     }
   };
 
