@@ -1098,7 +1098,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
 		fingerprint := seriesFingerprint(series, airedOnly)
-		if recentOnly && !changedSince.IsZero() && !itemChangedSince(series, changedSince) {
+		forceRescanSeries := onlySeriesID != ""
+		if !forceRescanSeries && recentOnly && !changedSince.IsZero() && !itemChangedSince(series, changedSince) {
 			if entry, ok := seriesScanCache.Get(series.ID); ok {
 				mu.Lock()
 				if entry.Matched {
@@ -1115,20 +1116,22 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				return
 			}
 		}
-		if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
-			mu.Lock()
-			if entry.Matched {
-				matchedSeries++
-				cachedSeries++
-				missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
-			} else if entry.Unmatched != nil {
-				cachedSeries++
-				unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
+		if !forceRescanSeries {
+			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Fingerprint == fingerprint {
+				mu.Lock()
+				if entry.Matched {
+					matchedSeries++
+					cachedSeries++
+					missing = append(missing, cloneMissingEpisodes(entry.Missing)...)
+				} else if entry.Unmatched != nil {
+					cachedSeries++
+					unmatchedSeries = append(unmatchedSeries, *entry.Unmatched)
+				}
+				mu.Unlock()
+				addSkipped(series, "cache", "指纹未变化，直接使用缓存")
+				advanceProgress(3, fmt.Sprintf("《%s》未变化，直接使用缓存", title), title)
+				return
 			}
-			mu.Unlock()
-			addSkipped(series, "cache", "指纹未变化，直接使用缓存")
-			advanceProgress(3, fmt.Sprintf("《%s》未变化，直接使用缓存", title), title)
-			return
 		}
 		mu.Lock()
 		rescannedSeries++
