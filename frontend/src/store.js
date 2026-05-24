@@ -9,7 +9,7 @@ const useStore = create((set, get) => ({
   missing: [],
   seriesSearches: {},
   transfers: {},
-  activeJobId: localStorage.getItem('active_job_id') || null,
+  activeJobId: null,
   jobStatus: null,
   expandedSeries: {},
 
@@ -29,13 +29,8 @@ const useStore = create((set, get) => ({
   setTransfer: (key, data) => set(state => ({
     transfers: { ...state.transfers, [key]: data }
   })),
-  setActiveJobId: (id) => {
-    if (id) localStorage.setItem('active_job_id', id);
-    else localStorage.removeItem('active_job_id');
-    set({ activeJobId: id });
-  },
+  setActiveJobId: (id) => set({ activeJobId: id }),
   clearJob: () => {
-    localStorage.removeItem('active_job_id');
     set({ activeJobId: null, jobStatus: null });
   },
   setJobStatus: (jobStatus) => set({ jobStatus }),
@@ -72,14 +67,8 @@ const useStore = create((set, get) => ({
         if (Array.isArray(saved)) get().applySearchResults(saved);
       } catch {}
     } catch {
-      // 初始化失败时保留 activeJobId，避免中断后台扫描
-      const activeJobId = get().activeJobId;
       localStorage.removeItem('auth_token');
-      set({ token: '', username: '', scan: null, missing: [], seriesSearches: {}, transfers: {}, activeJobId: null });
-      if (activeJobId) {
-        localStorage.setItem('active_job_id', activeJobId);
-        set({ activeJobId });
-      }
+      set({ token: '', username: '', scan: null, missing: [], seriesSearches: {}, transfers: {}, activeJobId: null, jobStatus: null });
     }
   },
 }));

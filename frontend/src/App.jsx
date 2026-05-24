@@ -16,9 +16,18 @@ function JobPoller() {
   const applySearchResults = useStore(s => s.applySearchResults);
   const clearJob = useStore(s => s.clearJob);
   const intervalRef = useRef(null);
+  const activeJobIdRef = useRef(activeJobId);
+
+  useEffect(() => {
+    activeJobIdRef.current = activeJobId;
+  }, [activeJobId]);
 
   const applyJob = (j) => {
+    if (!j) return;
     setJobStatus(j);
+    if (j.id && activeJobIdRef.current !== j.id) {
+      setActiveJobId(j.id);
+    }
     if (j.result?.scan) {
       setScan(j.result.scan);
     }
@@ -33,7 +42,6 @@ function JobPoller() {
   const recoverActiveJob = async () => {
     const data = await api('/api/jobs/active');
     if (data.job?.id) {
-      setActiveJobId(data.job.id);
       applyJob(data.job);
       return true;
     }
@@ -43,17 +51,21 @@ function JobPoller() {
   useEffect(() => {
     const poll = async () => {
       try {
-        if (!activeJobId) {
-          await recoverActiveJob();
+        const recovered = await recoverActiveJob();
+        if (recovered) {
           return;
         }
-        const j = await api(`/api/jobs/${activeJobId}`);
+        const currentJobId = activeJobIdRef.current;
+        if (!currentJobId) {
+          return;
+        }
+        const j = await api(`/api/jobs/${currentJobId}`);
         applyJob(j);
       } catch (err) {
-        // 只有确认服务端没有活跃任务时才清理本地任务，避免刷新或跨设备轮询抖动导致任务条消失。
+        // 以服务端活跃任务为准；瞬时失败时保留当前展示，避免任务条误消失。
         try {
           const recovered = await recoverActiveJob();
-          if (!recovered && err?.status === 404) {
+          if (!recovered && err?.status === 404 && activeJobIdRef.current) {
             clearJob();
           }
         } catch {
@@ -64,7 +76,7 @@ function JobPoller() {
     poll();
     intervalRef.current = setInterval(poll, 2000);
     return () => clearInterval(intervalRef.current);
-  }, [activeJobId]);
+  }, []);
 
   return null;
 }
