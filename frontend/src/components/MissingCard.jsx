@@ -136,6 +136,15 @@ export default function MissingCard({ group, selectable = false, selected = fals
           <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${healthPct >= 100 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
             {healthPct >= 100 ? '完整' : '缺失'}
           </span>
+          {!selectable && onIgnore && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onIgnore(group); }}
+              className="absolute left-2 top-2 z-10 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600 shadow hover:text-red-500"
+            >
+              忽略
+            </button>
+          )}
           {totalEps > 0 && (
             <div className="absolute bottom-0 left-0 right-0 p-2">
               <div className="h-1 w-full rounded-full bg-white/30 mb-1">
@@ -150,12 +159,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{group.title}</p>
-          <div className="mt-0.5 flex items-center justify-between gap-2">
-            <p className="text-[10px] text-red-500">缺{missingEps}集</p>
-            {!selectable && onIgnore && (
-              <button type="button" onClick={(e) => { e.stopPropagation(); onIgnore(group); }} className="text-[10px] font-bold text-gray-400 hover:text-red-500">忽略</button>
-            )}
-          </div>
+          <p className="text-[10px] text-red-500 mt-0.5">缺{missingEps}集</p>
         </div>
       </div>
 
