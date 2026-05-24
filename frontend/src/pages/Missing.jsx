@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2, CheckSquare, Square, ShieldCheck } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2, CheckSquare, Square, ShieldCheck, X } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -18,6 +18,7 @@ export default function Missing() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({});
   const [exemptions, setExemptions] = useState({ manual: [], complete: [] });
+  const [exemptionsOpen, setExemptionsOpen] = useState(false);
   const [exemptionTab, setExemptionTab] = useState('manual');
   const [selectedExemptions, setSelectedExemptions] = useState({});
 
@@ -26,6 +27,7 @@ export default function Missing() {
   const unmatchedSeries = scan?.unmatched?.series || [];
   const skippedSeries = diagnostics.skipped || [];
   const comparedSeries = diagnostics.compared || [];
+  const activeExemptions = exemptionTab === 'manual' ? exemptions.manual : exemptions.complete;
 
   // Group + compute health
   const groups = {};
@@ -75,6 +77,17 @@ export default function Missing() {
   };
 
   useEffect(() => { loadExemptions(); }, []);
+
+  const openExemptionModal = (tab = 'manual') => {
+    setExemptionTab(tab);
+    setSelectedExemptions({});
+    setExemptionsOpen(true);
+  };
+
+  const closeExemptionModal = () => {
+    setExemptionsOpen(false);
+    setSelectedExemptions({});
+  };
 
   const toExemptionItem = (group) => ({
     id: group.embySeriesId,
@@ -212,43 +225,74 @@ export default function Missing() {
         </div>
       </details>
 
-      <div className="card space-y-4">
+      <div onClick={() => openExemptionModal('manual')} className="card cursor-pointer space-y-4 transition-shadow hover:shadow-md">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-gray-900">免检名单</h2>
-            <p className="mt-1 text-xs text-gray-400">手动忽略和完结归档的剧集，扫描时会跳过。</p>
+            <p className="mt-1 text-xs text-gray-400">手动忽略和完结归档的剧集，扫描时会跳过；点击后通过弹窗管理。</p>
           </div>
-          <ShieldCheck className="h-5 w-5 text-emerald-500" />
+          <div className="flex items-center gap-3">
+            <div className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700">
+              共 {exemptions.manual.length + exemptions.complete.length} 项
+            </div>
+            <ShieldCheck className="h-5 w-5 text-emerald-500" />
+          </div>
         </div>
         <div className="flex gap-2">
-          <button type="button" onClick={() => { setExemptionTab('manual'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'manual' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>手动忽略 · {exemptions.manual.length}</button>
-          <button type="button" onClick={() => { setExemptionTab('complete'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'complete' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>完结归档 · {exemptions.complete.length}</button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); openExemptionModal('manual'); }} className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 hover:border-primary-300 hover:text-primary-600">手动忽略 · {exemptions.manual.length}</button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); openExemptionModal('complete'); }} className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 hover:border-primary-300 hover:text-primary-600">完结归档 · {exemptions.complete.length}</button>
         </div>
-        {selectedExemptionItems.length > 0 && (
-          <div className="flex items-center justify-between rounded-lg border border-red-100 bg-red-50 px-3 py-2">
-            <span className="text-xs font-bold text-red-700">已选 {selectedExemptionItems.length} 项</span>
-            <button type="button" onClick={() => deleteExemptions(selectedExemptionItems)} className="text-xs font-bold text-red-600 hover:text-red-700">批量移除</button>
-          </div>
-        )}
-        <div className="max-h-60 overflow-y-auto space-y-2">
-          {(exemptionTab === 'manual' ? exemptions.manual : exemptions.complete).length === 0 ? (
-            <p className="text-sm text-gray-500 py-3">当前名单为空。</p>
-          ) : (
-            (exemptionTab === 'manual' ? exemptions.manual : exemptions.complete).map(item => (
-              <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-                <button type="button" onClick={() => toggleExemption(item)} className="shrink-0 text-gray-400 hover:text-primary-600">
-                  {selectedExemptions[item.id] ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-                </button>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
-                  <p className="text-xs text-gray-400">{item.tmdbName || item.tmdbId || '无 TMDB 信息'}</p>
-                </div>
-                <button type="button" onClick={() => deleteExemptions([item])} className="shrink-0 text-xs font-bold text-red-500 hover:text-red-600">移除</button>
-              </div>
-            ))
-          )}
+        <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+          点击卡片或上方分类按钮后，在弹窗中查看、勾选和批量移除名单。
         </div>
       </div>
+
+      {exemptionsOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 pb-8 pt-8" onClick={closeExemptionModal}>
+          <div className="fixed inset-0 bg-black/40" />
+          <div className="relative my-auto w-full max-w-2xl rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 border-b border-gray-100 p-4">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">免检名单</h2>
+                <p className="mt-1 text-xs text-gray-400">手动忽略和完结归档的剧集，扫描时会跳过。</p>
+              </div>
+              <button type="button" onClick={closeExemptionModal} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="space-y-4 p-4">
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => { setExemptionTab('manual'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'manual' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>手动忽略 · {exemptions.manual.length}</button>
+                <button type="button" onClick={() => { setExemptionTab('complete'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'complete' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>完结归档 · {exemptions.complete.length}</button>
+              </div>
+              {selectedExemptionItems.length > 0 && (
+                <div className="flex items-center justify-between rounded-lg border border-red-100 bg-red-50 px-3 py-2">
+                  <span className="text-xs font-bold text-red-700">已选 {selectedExemptionItems.length} 项</span>
+                  <button type="button" onClick={() => deleteExemptions(selectedExemptionItems)} className="text-xs font-bold text-red-600 hover:text-red-700">批量移除</button>
+                </div>
+              )}
+              <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+                {activeExemptions.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-gray-500">当前名单为空。</p>
+                ) : (
+                  activeExemptions.map(item => (
+                    <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                      <button type="button" onClick={() => toggleExemption(item)} className="shrink-0 text-gray-400 hover:text-primary-600">
+                        {selectedExemptions[item.id] ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
+                        <p className="text-xs text-gray-400">{item.tmdbName || item.tmdbId || '无 TMDB 信息'}</p>
+                      </div>
+                      <button type="button" onClick={() => deleteExemptions([item])} className="shrink-0 text-xs font-bold text-red-500 hover:text-red-600">移除</button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <details className="card space-y-4">
         <summary className="cursor-pointer list-none">
