@@ -29,6 +29,7 @@ export default function Missing() {
         key,
         title: item.officialTitle || item.embyTitle,
         tmdbId: item.tmdbId,
+        embySeriesId: item.embySeriesId,
         posterPath: item.posterPath,
         totalEpisodes: item.totalEpisodes || 0,
         ownedEpisodes: item.ownedEpisodes || 0,

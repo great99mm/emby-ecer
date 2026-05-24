@@ -328,17 +328,18 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/scan" && r.Method == http.MethodPost:
 		var body struct {
-			AiredOnly  bool `json:"airedOnly"`
-			MaxSeries  int  `json:"maxSeries"`
-			RecentOnly bool `json:"recentOnly"`
-			ClearCache bool `json:"clearCache"`
+			AiredOnly  bool   `json:"airedOnly"`
+			MaxSeries  int    `json:"maxSeries"`
+			RecentOnly bool   `json:"recentOnly"`
+			ClearCache bool   `json:"clearCache"`
+			SeriesID   string `json:"seriesId"`
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
 		if body.ClearCache {
 			clearLocalScanCaches()
 		}
-		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), nil)
+		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), strings.TrimSpace(body.SeriesID), nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
 			return
@@ -936,7 +937,7 @@ type scanCompareEntry struct {
 	Reason          string `json:"reason"`
 }
 
-func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
+func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onlySeriesID string, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
 	}
@@ -946,7 +947,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	movieItems := make([]embyItem, 0)
 	seriesTotal := 0
 	movieTotal := 0
-	fullSeriesScan := maxSeries <= 0
+	onlySeriesID = strings.TrimSpace(onlySeriesID)
+	fullSeriesScan := maxSeries <= 0 && onlySeriesID == ""
 
 	itemStart := 0
 	itemPageLimit := 1000
@@ -967,6 +969,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			switch item.Type {
 			case "Series":
 				seriesTotal++
+				if onlySeriesID != "" && item.ID != onlySeriesID {
+					continue
+				}
 				seriesItems = append(seriesItems, item)
 			case "Movie":
 				movieTotal++
@@ -1804,6 +1809,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		MaxSeries  int    `json:"maxSeries"`
 		RecentOnly bool   `json:"recentOnly"`
 		ClearCache bool   `json:"clearCache"`
+		SeriesID   string `json:"seriesId"`
 	}
 	body.AiredOnly = true
 	_ = readJSON(r, &body)
@@ -1828,7 +1834,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	j := jobMgr.create(body.Type)
 	activateScanJob(j.ID)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache)
+	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache, strings.TrimSpace(body.SeriesID))
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
 
@@ -1862,7 +1868,7 @@ func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
-func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool) {
+func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool, seriesID string) {
 	defer finishActiveScanJob(id)
 	update := func(fn func(*job)) bool {
 		if !isActiveScanJob(id) {
@@ -1918,7 +1924,7 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		}
 	}()
 
-	result, err := scanLibrary(s, airedOnly, maxSeries, recentOnly, changedSince, func(processed, total int, detail, current string, snapshot map[string]any) {
+	result, err := scanLibrary(s, airedOnly, maxSeries, recentOnly, changedSince, seriesID, func(processed, total int, detail, current string, snapshot map[string]any) {
 		if total <= 0 {
 			total = 1
 		}
@@ -1949,6 +1955,9 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	if err != nil {
 		update(func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
 		return
+	}
+	if strings.TrimSpace(seriesID) != "" {
+		result = mergeSingleSeriesScanResult(seriesID, result)
 	}
 	_ = saveScanResult(result)
 	missingCount := 0
@@ -3015,6 +3024,67 @@ func saveScanResult(result map[string]any) error {
 		return err
 	}
 	return os.WriteFile(path, raw, 0o600)
+}
+
+func mergeSingleSeriesScanResult(seriesID string, fresh map[string]any) map[string]any {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return fresh
+	}
+	previous, err := loadScanResult()
+	if err != nil || previous == nil {
+		return fresh
+	}
+
+	mergedMissing := make([]any, 0)
+	for _, item := range anySlice(previous["missing"]) {
+		if missingItemSeriesID(item) == seriesID {
+			continue
+		}
+		mergedMissing = append(mergedMissing, item)
+	}
+	mergedMissing = append(mergedMissing, anySlice(fresh["missing"])...)
+
+	previous["missing"] = mergedMissing
+	previous["scannedAt"] = time.Now().Format(time.RFC3339)
+	if summary, ok := previous["summary"].(map[string]any); ok {
+		summary["totalMissingEpisodes"] = len(mergedMissing)
+		summary["scanMode"] = "single"
+		if freshSummary, ok := fresh["summary"].(map[string]any); ok {
+			summary["seriesRescanned"] = freshSummary["seriesRescanned"]
+			summary["seriesCached"] = freshSummary["seriesCached"]
+			summary["unmatchedSeries"] = freshSummary["unmatchedSeries"]
+		}
+	}
+	previous["diagnostics"] = fresh["diagnostics"]
+	previous["unmatched"] = fresh["unmatched"]
+	return previous
+}
+
+func anySlice(value any) []any {
+	switch items := value.(type) {
+	case []any:
+		return items
+	case []missingEpisode:
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return []any{}
+	}
+}
+
+func missingItemSeriesID(item any) string {
+	switch v := item.(type) {
+	case missingEpisode:
+		return v.EmbySeriesID
+	case map[string]any:
+		return strings.TrimSpace(fmt.Sprint(v["embySeriesId"]))
+	default:
+		return ""
+	}
 }
 
 func loadScanResult() (map[string]any, error) {

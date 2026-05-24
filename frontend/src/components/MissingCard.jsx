@@ -2,7 +2,7 @@ import { useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Search, Download, X } from 'lucide-react';
+import { Search, Download, X, RefreshCw } from 'lucide-react';
 import SearchResults from './SearchResults';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
@@ -11,6 +11,9 @@ export default function MissingCard({ group }) {
   const seriesKey = `series:${group.tmdbId || group.key}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
+  const setActiveJobId = useStore(s => s.setActiveJobId);
+  const setJobStatus = useStore(s => s.setJobStatus);
+  const jobStatus = useStore(s => s.jobStatus);
   const [open, setOpen] = useState(false);
   const [mpPage, setMpPage] = useState(1);
   const pageSize = 20;
@@ -21,6 +24,22 @@ export default function MissingCard({ group }) {
   const missingEps = (group.items || []).length;
   const codes = (group.codes || []).join('、');
   const codeList = group.codes || [];
+  const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
+
+  const rescanSeries = async () => {
+    if (!group.embySeriesId) {
+      toast.error('缺少 Emby 剧集 ID，无法单独扫描');
+      return;
+    }
+    try {
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, seriesId: group.embySeriesId }) });
+      setActiveJobId(data.jobId);
+      setJobStatus({ status: 'running', progress: 0, message: `正在重新扫描《${group.title}》...`, current: group.title });
+      toast.success('已开始单剧扫描');
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
 
   const doSearch = async () => {
     setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes }));
@@ -150,7 +169,12 @@ export default function MissingCard({ group }) {
                 </div>
                 <p className="text-xs text-gray-500 mt-1">缺失集号：{codes}</p>
               </div>
-              <button onClick={() => setOpen(false)} className="shrink-0 p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
+              <div className="shrink-0 flex items-center gap-1">
+                <button title="重新扫描此剧" onClick={rescanSeries} disabled={busy || !group.embySeriesId} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed">
+                  <RefreshCw className={`w-4 h-4 text-gray-400 ${busy ? 'animate-spin' : ''}`} />
+                </button>
+                <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
+              </div>
             </div>
             <div className="px-4 py-3 grid grid-cols-2 gap-2">
               <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
