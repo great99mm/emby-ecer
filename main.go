@@ -46,7 +46,7 @@ var (
 		ExpiresAt time.Time
 	}{}
 
-	jobMgr = newJobManager()
+	jobMgr *jobManager
 )
 
 type jobStatus string
@@ -73,11 +73,38 @@ type job struct {
 
 type jobManager struct {
 	mu   sync.RWMutex
+	path string
 	jobs map[string]*job
 }
 
-func newJobManager() *jobManager {
-	return &jobManager{jobs: map[string]*job{}}
+type persistedJobState struct {
+	Jobs map[string]*job `json:"jobs"`
+}
+
+func newJobManager(path string) *jobManager {
+	m := &jobManager{path: path, jobs: map[string]*job{}}
+	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		var state persistedJobState
+		if err := json.Unmarshal(raw, &state); err == nil {
+			for id, item := range state.Jobs {
+				if item == nil || strings.TrimSpace(id) == "" {
+					continue
+				}
+				cloned := cloneJob(item)
+				if cloned.Status == jobRunning || cloned.Status == jobPending {
+					cloned.Status = jobError
+					cloned.Error = "服务重启，任务已中断"
+					cloned.Message = "服务重启，任务已中断"
+					cloned.Current = "已中断"
+					cloned.UpdatedAt = time.Now()
+				}
+				m.jobs[id] = cloned
+			}
+		}
+	}
+	m.cleanupLocked()
+	_ = m.persistLocked()
+	return m
 }
 
 func (m *jobManager) create(typ string) *job {
@@ -86,19 +113,18 @@ func (m *jobManager) create(typ string) *job {
 	id := randomID(12)
 	j := &job{ID: id, Type: typ, Status: jobPending, Progress: 0, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	m.jobs[id] = j
-	// 清理超过 1 小时的旧任务
-	for k, v := range m.jobs {
-		if v.Status != jobRunning && v.Status != jobPending && time.Since(v.UpdatedAt) > time.Hour {
-			delete(m.jobs, k)
-		}
-	}
-	return j
+	m.cleanupLocked()
+	_ = m.persistLocked()
+	return cloneJob(j)
 }
 
 func (m *jobManager) get(id string) *job {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.jobs[id]
+	if j, ok := m.jobs[id]; ok {
+		return cloneJob(j)
+	}
+	return nil
 }
 
 func (m *jobManager) update(id string, fn func(*job)) {
@@ -107,7 +133,52 @@ func (m *jobManager) update(id string, fn func(*job)) {
 	if j, ok := m.jobs[id]; ok {
 		fn(j)
 		j.UpdatedAt = time.Now()
+		m.cleanupLocked()
+		_ = m.persistLocked()
 	}
+}
+
+func (m *jobManager) persist() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.persistLocked()
+}
+
+func (m *jobManager) cleanupLocked() {
+	for k, v := range m.jobs {
+		if v == nil || (v.Status != jobRunning && v.Status != jobPending && time.Since(v.UpdatedAt) > time.Hour) {
+			delete(m.jobs, k)
+		}
+	}
+}
+
+func (m *jobManager) persistLocked() error {
+	if m == nil || strings.TrimSpace(m.path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+		return err
+	}
+	state := persistedJobState{Jobs: map[string]*job{}}
+	for id, item := range m.jobs {
+		if item == nil {
+			continue
+		}
+		state.Jobs[id] = cloneJob(item)
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(m.path, raw, 0o600)
+}
+
+func cloneJob(in *job) *job {
+	if in == nil {
+		return nil
+	}
+	cloned := *in
+	return &cloned
 }
 
 func activateScanJob(id string) {
@@ -226,6 +297,7 @@ func main() {
 	store = newSettingsStore(configPath)
 	tmdbCache = newTMDBCacheStore(getenv("TMDB_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "tmdb-cache.json")), time.Duration(getenvInt("TMDB_CACHE_TTL_HOURS", 24))*time.Hour)
 	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
+	jobMgr = newJobManager(getenv("JOB_STATE_PATH", filepath.Join(filepath.Dir(configPath), "jobs.json")))
 
 	port := getenv("PORT", "3000")
 	server := &http.Server{
