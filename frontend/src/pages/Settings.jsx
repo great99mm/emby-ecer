@@ -148,6 +148,8 @@ export default function Settings() {
 
       <AuthSection title="HDHive" icon={sectionIcons.HDHive} ready={ready.hdhive} onTest={testConnection} target="hdhive">
         <Input name="hdhiveUrl" label="HDHive 地址" value={get('hdhiveUrl')} onChange={e => update('hdhiveUrl', e.target.value)} placeholder="https://hdhive.com" />
+        <Input name="hdhiveUsername" label="HDHive 用户名 (可选)" value={get('hdhiveUsername')} onChange={e => update('hdhiveUsername', e.target.value)} placeholder="Cookie 失效后自动登录使用" />
+        <Input name="hdhivePassword" label="HDHive 密码 (可选)" value={get('hdhivePassword')} onChange={e => update('hdhivePassword', e.target.value)} type="password" placeholder="留空表示不覆盖" />
         <Textarea name="hdhiveCookie" label="HDHive Cookie" value={get('hdhiveCookie')} onChange={e => update('hdhiveCookie', e.target.value)} placeholder="粘贴 HDHive 网页 Cookie；留空表示不覆盖" />
       </AuthSection>
 

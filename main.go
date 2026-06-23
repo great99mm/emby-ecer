@@ -241,6 +241,8 @@ type settings struct {
 	MPUrl           string `json:"mpUrl"`
 	MPToken         string `json:"mpToken"`
 	HDHiveURL       string `json:"hdhiveUrl"`
+	HDHiveUsername  string `json:"hdhiveUsername"`
+	HDHivePassword  string `json:"hdhivePassword"`
 	HDHiveCookie    string `json:"hdhiveCookie"`
 	SubEnabled      bool   `json:"subEnabled"`
 	SubInterval     int    `json:"subInterval"`
@@ -563,6 +565,8 @@ func settingsFromEnv() settings {
 		MPUrl:           os.Getenv("MP_URL"),
 		MPToken:         os.Getenv("MP_TOKEN"),
 		HDHiveURL:       getenv("HDHIVE_URL", defaultHDHiveURL),
+		HDHiveUsername:  os.Getenv("HDHIVE_USERNAME"),
+		HDHivePassword:  os.Getenv("HDHIVE_PASSWORD"),
 		HDHiveCookie:    os.Getenv("HDHIVE_COOKIE"),
 		SubEnabled:      getenvBool("SUBSCRIPTION_ENABLED", false),
 		SubInterval:     getenvInt("SUBSCRIPTION_INTERVAL_HOURS", 6),
@@ -634,6 +638,8 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 		}
 		next.HDHiveURL = strings.TrimRight(v, "/")
 	})
+	setPlain("hdhiveUsername", func(v string) { next.HDHiveUsername = v })
+	setSecret("hdhivePassword", func(v string) { next.HDHivePassword = v })
 	setSecret("hdhiveCookie", func(v string) { next.HDHiveCookie = v })
 	setPlain("subEnabled", func(v string) { next.SubEnabled = parseBool(v) })
 	setPlain("subInterval", func(v string) { next.SubInterval = clampIntervalHours(parseInt(v)) })
@@ -707,6 +713,8 @@ func maskSettings(s settings) map[string]any {
 		"mpUrl":           s.MPUrl,
 		"mpToken":         maskSecret(s.MPToken, 4),
 		"hdhiveUrl":       fallback(s.HDHiveURL, defaultHDHiveURL),
+		"hdhiveUsername":  s.HDHiveUsername,
+		"hdhivePassword":  maskSecret(s.HDHivePassword, 4),
 		"hdhiveCookie":    maskSecret(s.HDHiveCookie, 12),
 		"subEnabled":      s.SubEnabled,
 		"subInterval":     clampIntervalHours(s.SubInterval),
@@ -720,7 +728,7 @@ func maskSettings(s settings) map[string]any {
 			"pansou": s.PansouURL != "",
 			"p115":   s.P115Cookie != "",
 			"mp":     s.MPUrl != "" && s.MPToken != "",
-			"hdhive": s.HDHiveURL != "" && s.HDHiveCookie != "",
+			"hdhive": s.HDHiveURL != "" && (s.HDHiveCookie != "" || s.HDHiveUsername != "" && s.HDHivePassword != ""),
 			"llm":    s.OpenAIBaseURL != "" && s.OpenAIAPIKey != "" && s.OpenAIModel != "",
 		},
 	}
@@ -1006,11 +1014,17 @@ func testConnection(target string, s settings) map[string]any {
 				result[item] = map[string]any{"ok": true, "name": "115 用户"}
 			}
 		case "hdhive":
-			if err := requireFields(s, "hdhiveCookie"); err != nil {
+			if err := requireHDHiveAuth(s); err != nil {
 				result[item] = failResult(err)
 				continue
 			}
-			info, err := newHDHiveClient(s).CheckConnection()
+			client, err := newAuthenticatedHDHiveClient(s)
+			if err != nil {
+				result[item] = failResult(err)
+				continue
+			}
+			defer syncHDHiveCookie(client)
+			info, err := client.CheckConnection()
 			if err != nil {
 				result[item] = failResult(err)
 			} else {

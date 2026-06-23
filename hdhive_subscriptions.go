@@ -255,11 +255,16 @@ func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := requireFields(store.Get(), "hdhiveCookie"); err != nil {
+	settingsSnapshot := store.Get()
+	if err := requireHDHiveAuth(settingsSnapshot); err != nil {
 		writeError(w, statusFromError(err), err)
 		return
 	}
-	client := newHDHiveClient(store.Get())
+	client, err := newAuthenticatedHDHiveClient(settingsSnapshot)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
 	defer syncHDHiveCookie(client)
 	unlocked, err := client.Unlock(body.Slug)
 	if err != nil {
@@ -350,10 +355,13 @@ func searchSubscriptionResources(s settings, item subscription) ([]normalizedRes
 }
 
 func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) ([]normalizedResult, error) {
-	if err := requireFields(s, "hdhiveCookie"); err != nil {
+	if err := requireHDHiveAuth(s); err != nil {
 		return nil, err
 	}
-	client := newHDHiveClient(s)
+	client, err := newAuthenticatedHDHiveClient(s)
+	if err != nil {
+		return nil, err
+	}
 	defer syncHDHiveCookie(client)
 	resources, err := client.Search(keyword, mediaType, tmdbID)
 	if err != nil {
@@ -391,6 +399,41 @@ func newHDHiveClient(s settings) *hdhiveClient {
 	return &hdhiveClient{baseURL: strings.TrimRight(fallback(s.HDHiveURL, defaultHDHiveURL), "/"), cookie: s.HDHiveCookie, client: &http.Client{Timeout: 30 * time.Second, Jar: jar}}
 }
 
+func newAuthenticatedHDHiveClient(s settings) (*hdhiveClient, error) {
+	if err := requireHDHiveAuth(s); err != nil {
+		return nil, err
+	}
+	client := newHDHiveClient(s)
+	if !hasHDHiveCredentials(s) {
+		return client, nil
+	}
+	if strings.TrimSpace(s.HDHiveCookie) == "" {
+		if _, err := client.Login(s.HDHiveUsername, s.HDHivePassword); err != nil {
+			return nil, err
+		}
+		syncHDHiveCookie(client)
+		return client, nil
+	}
+	if _, err := client.CheckConnection(); err != nil {
+		if _, loginErr := client.Login(s.HDHiveUsername, s.HDHivePassword); loginErr != nil {
+			return nil, fmt.Errorf("HDHive Cookie 失效，自动登录失败：%w", loginErr)
+		}
+		syncHDHiveCookie(client)
+	}
+	return client, nil
+}
+
+func hasHDHiveCredentials(s settings) bool {
+	return strings.TrimSpace(s.HDHiveUsername) != "" && strings.TrimSpace(s.HDHivePassword) != ""
+}
+
+func requireHDHiveAuth(s settings) error {
+	if strings.TrimSpace(s.HDHiveCookie) != "" || hasHDHiveCredentials(s) {
+		return nil
+	}
+	return badRequest("缺少配置：hdhiveCookie 或 hdhiveUsername/hdhivePassword")
+}
+
 func (c *hdhiveClient) CheckConnection() (map[string]any, error) {
 	for _, path := range []string{"/user/settings", "/"} {
 		raw, err := c.fetchText(path)
@@ -402,6 +445,38 @@ func (c *hdhiveClient) CheckConnection() (map[string]any, error) {
 		}
 	}
 	return nil, errors.New("HDHive Cookie 无效或未登录")
+}
+
+func (c *hdhiveClient) Login(username, password string) (map[string]any, error) {
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" || password == "" {
+		return nil, badRequest("HDHive 用户名或密码为空")
+	}
+	pagePath := "/login"
+	raw, err := c.fetchText(pagePath)
+	if err != nil {
+		return nil, err
+	}
+	actionID, err := c.resolveActionID(raw, "login")
+	if err != nil || actionID == "" {
+		return nil, firstErr(err, errors.New("未找到 HDHive login action"))
+	}
+	body, _ := json.Marshal([]map[string]string{{"username": username, "password": password}})
+	responseRaw, err := c.postHDHiveAction(pagePath, actionID, body)
+	if err != nil {
+		return nil, err
+	}
+	if user := extractHDHiveCurrentUser(string(responseRaw)); len(user) > 0 {
+		return user, nil
+	}
+	if user, err := c.CheckConnection(); err == nil && len(user) > 0 {
+		return user, nil
+	}
+	if message := extractHDHiveActionMessage(responseRaw); message != "" {
+		return nil, errors.New("HDHive 登录失败：" + message)
+	}
+	return nil, errors.New("HDHive 登录失败，未获取到用户信息")
 }
 
 func (c *hdhiveClient) Search(keyword, mediaType string, tmdbID int) ([]hdhiveResource, error) {
@@ -876,6 +951,7 @@ func extractHDHiveChunkPaths(raw string) []string {
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`/_next/static/chunks/[A-Za-z0-9._()/-]+\.js`),
 		regexp.MustCompile(`static/chunks/[A-Za-z0-9._()/-]+\.js`),
+		regexp.MustCompile(`app/\(auth\)/login/page-[A-Za-z0-9]+\.js`),
 		regexp.MustCompile(`app/\(no-layout\)/resource/[A-Za-z0-9._()/-]+\.js`),
 	}
 	seen := map[string]bool{}
@@ -961,6 +1037,33 @@ func extractHDHiveActionShareLink(raw string) string {
 		share += joiner + url.Values{"password": []string{code}}.Encode()
 	}
 	return share
+}
+
+func extractHDHiveActionMessage(raw []byte) string {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "1:") {
+			line = strings.TrimPrefix(line, "1:")
+		}
+		var payload map[string]any
+		if json.Unmarshal([]byte(line), &payload) != nil {
+			continue
+		}
+		if message := anyToString(payload["message"]); message != "" {
+			return message
+		}
+		if response, ok := payload["response"].(map[string]any); ok {
+			if message := anyToString(response["message"]); message != "" {
+				return message
+			}
+		}
+		if errObj, ok := payload["error"].(map[string]any); ok {
+			if message := anyToString(errObj["message"]); message != "" {
+				return message
+			}
+		}
+	}
+	return ""
 }
 
 func extractHDHiveAccessCode(raw string) string {
