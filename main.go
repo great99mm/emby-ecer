@@ -401,6 +401,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 		}
 		writeJSON(w, http.StatusOK, testConnection(body.Target, store.Get()))
 
+	case r.URL.Path == "/api/tmdb/search" && r.Method == http.MethodPost:
+		handleTMDBSearch(w, r)
+
 	case r.URL.Path == "/api/hdhive/search" && r.Method == http.MethodPost:
 		handleHDHiveSearch(w, r)
 
@@ -1081,6 +1084,67 @@ func failResult(err error) map[string]any {
 	return map[string]any{"ok": false, "error": err.Error()}
 }
 
+func handleTMDBSearch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Query     string `json:"query"`
+		MediaType string `json:"mediaType"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	results, err := searchTMDBForSubscriptions(store.Get(), body.Query, body.MediaType)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"query": strings.TrimSpace(body.Query), "results": results})
+}
+
+func searchTMDBForSubscriptions(s settings, query, mediaType string) ([]map[string]any, error) {
+	if err := requireFields(s, "tmdbApiKey"); err != nil {
+		return nil, err
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, badRequest("请输入要搜索的标题")
+	}
+	mediaType = normalizeHDHiveMediaType(mediaType)
+	route := "/search/tv"
+	if mediaType == "movie" {
+		route = "/search/movie"
+	}
+	var resp tmdbSearchResp
+	if err := tmdbGet(s, route, map[string]string{"query": query, "language": "zh-CN", "include_adult": "false"}, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(resp.Results))
+	for _, item := range resp.Results {
+		title := firstNonEmpty(item.Name, item.Title, item.OriginalName, item.OriginalTitle)
+		date := firstNonEmpty(item.FirstAirDate, item.ReleaseDate)
+		if title == "" || item.ID <= 0 {
+			continue
+		}
+		out = append(out, map[string]any{
+			"tmdbId":        item.ID,
+			"title":         title,
+			"originalTitle": firstNonEmpty(item.OriginalName, item.OriginalTitle),
+			"mediaType":     mediaType,
+			"year":          firstYear(date),
+			"date":          date,
+			"posterPath":    item.PosterPath,
+			"backdropPath":  item.BackdropPath,
+			"overview":      item.Overview,
+			"voteAverage":   item.VoteAverage,
+			"tmdbUrl":       fmt.Sprintf("https://www.themoviedb.org/%s/%d", mediaType, item.ID),
+		})
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return out, nil
+}
+
 type embyItemsResp struct {
 	Items []embyItem `json:"Items"`
 }
@@ -1116,13 +1180,18 @@ type embyEpisode struct {
 }
 
 type tmdbSearchItem struct {
-	ID            int    `json:"id"`
-	Name          string `json:"name"`
-	OriginalName  string `json:"original_name"`
-	Title         string `json:"title"`
-	OriginalTitle string `json:"original_title"`
-	FirstAirDate  string `json:"first_air_date"`
-	ReleaseDate   string `json:"release_date"`
+	ID            int     `json:"id"`
+	Name          string  `json:"name"`
+	OriginalName  string  `json:"original_name"`
+	Title         string  `json:"title"`
+	OriginalTitle string  `json:"original_title"`
+	FirstAirDate  string  `json:"first_air_date"`
+	ReleaseDate   string  `json:"release_date"`
+	Overview      string  `json:"overview"`
+	PosterPath    string  `json:"poster_path"`
+	BackdropPath  string  `json:"backdrop_path"`
+	MediaType     string  `json:"media_type"`
+	VoteAverage   float64 `json:"vote_average"`
 }
 
 type tmdbSearchResp struct {
