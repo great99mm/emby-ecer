@@ -19,10 +19,19 @@ docker run -d --name emby-ecer -p 3000:3000 \
   -v /path/to/data:/data \
   -e APP_USERS=admin:yourpassword \
   -e APP_JWT_SECRET=random-secret \
-  ghcr.io/你的用户名/emby-ecer:latest
+  dedehao/emby-ecer:latest
 ```
 
 首次启动后访问 `http://IP:3000`，默认账号 `admin / admin123`（建议修改）。
+
+## 镜像发布
+
+创建并发布 GitHub Release 后，工作流会自动构建多架构镜像并推送到 Docker Hub：
+
+- `dedehao/emby-ecer:latest`
+- `dedehao/emby-ecer:<release-tag>`
+
+工作流使用仓库 Secrets：`DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`。
 
 ## 配置
 
