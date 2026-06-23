@@ -77,6 +77,7 @@ export default function Settings() {
   const setSettings = useStore(s => s.setSettings);
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
+  const [refreshingHDHive, setRefreshingHDHive] = useState(false);
 
   const update = (name, value) => setForm(f => ({ ...f, [name]: value }));
   const get = (name) => form[name] !== undefined ? form[name] : (settings[name] || '');
@@ -124,6 +125,28 @@ export default function Settings() {
     }
   };
 
+  const refreshHDHiveCookie = async () => {
+    const username = get('hdhiveUsername');
+    const password = form.hdhivePassword || '';
+    if (!username || (!password && !settings.hdhivePassword)) {
+      toast.error('请先填写并保存 HDHive 用户名和密码');
+      return;
+    }
+    setRefreshingHDHive(true);
+    try {
+      const payload = { username };
+      if (password) payload.password = password;
+      const data = await api('/api/hdhive/login', { method: 'POST', body: JSON.stringify(payload) });
+      if (data.settings) setSettings(data.settings);
+      setForm(f => ({ ...f, hdhiveCookie: '', hdhivePassword: '' }));
+      toast.success('HDHive Cookie 已刷新');
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setRefreshingHDHive(false);
+    }
+  };
+
   const ready = settings.ready || {};
 
   return (
@@ -151,6 +174,9 @@ export default function Settings() {
         <Input name="hdhiveUsername" label="HDHive 用户名 (可选)" value={get('hdhiveUsername')} onChange={e => update('hdhiveUsername', e.target.value)} placeholder="Cookie 失效后自动登录使用" />
         <Input name="hdhivePassword" label="HDHive 密码 (可选)" value={get('hdhivePassword')} onChange={e => update('hdhivePassword', e.target.value)} type="password" placeholder="留空表示不覆盖" />
         <Textarea name="hdhiveCookie" label="HDHive Cookie" value={get('hdhiveCookie')} onChange={e => update('hdhiveCookie', e.target.value)} placeholder="粘贴 HDHive 网页 Cookie；留空表示不覆盖" />
+        <button type="button" onClick={refreshHDHiveCookie} disabled={refreshingHDHive} className="btn-outline w-full flex items-center justify-center gap-2">
+          <Sparkles className="w-4 h-4" /> {refreshingHDHive ? '刷新中...' : '登录刷新 HDHive Cookie'}
+        </button>
       </AuthSection>
 
       <AuthSection title="115 转存" icon={sectionIcons['115 转存']} ready={ready.p115} onTest={testConnection} target="p115">

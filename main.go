@@ -404,6 +404,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 	case r.URL.Path == "/api/hdhive/search" && r.Method == http.MethodPost:
 		handleHDHiveSearch(w, r)
 
+	case r.URL.Path == "/api/hdhive/login" && r.Method == http.MethodPost:
+		handleHDHiveLogin(w, r)
+
 	case r.URL.Path == "/api/hdhive/unlock" && r.Method == http.MethodPost:
 		handleHDHiveUnlock(w, r)
 
@@ -690,6 +693,35 @@ func (s *settingsStore) UpdateHDHiveCookie(cookie string) error {
 		return nil
 	}
 	s.data.HDHiveCookie = cookie
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	raw, _ := json.MarshalIndent(s.data, "", "  ")
+	return os.WriteFile(s.path, raw, 0o600)
+}
+
+func (s *settingsStore) UpdateHDHiveAuth(username, password, cookie string) error {
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	cookie = strings.TrimSpace(cookie)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	if username != "" && username != s.data.HDHiveUsername {
+		s.data.HDHiveUsername = username
+		changed = true
+	}
+	if password != "" && password != s.data.HDHivePassword {
+		s.data.HDHivePassword = password
+		changed = true
+	}
+	if cookie != "" && cookie != strings.TrimSpace(s.data.HDHiveCookie) {
+		s.data.HDHiveCookie = cookie
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}

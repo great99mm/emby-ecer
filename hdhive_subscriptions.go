@@ -246,6 +246,37 @@ func handleHDHiveSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"query": strings.TrimSpace(body.Keyword), "total": len(results), "results": results})
 }
 
+func handleHDHiveLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	_ = readJSON(r, &body)
+	s := store.Get()
+	username := firstNonEmpty(body.Username, s.HDHiveUsername)
+	password := firstNonEmpty(body.Password, s.HDHivePassword)
+	if username == "" || password == "" {
+		writeError(w, http.StatusBadRequest, errors.New("请先填写 HDHive 用户名和密码"))
+		return
+	}
+	client := newHDHiveClient(settings{HDHiveURL: s.HDHiveURL, HDHiveUsername: username, HDHivePassword: password})
+	user, err := client.Login(username, password)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	cookie := client.cookieHeader()
+	if cookie == "" {
+		writeError(w, http.StatusBadGateway, errors.New("HDHive 登录成功但未返回 Cookie"))
+		return
+	}
+	if err := store.UpdateHDHiveAuth(username, password, cookie); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": user, "settings": maskSettings(store.Get())})
+}
+
 func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Slug  string `json:"slug"`
