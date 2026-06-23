@@ -928,7 +928,15 @@ func testConnection(target string, s settings) map[string]any {
 			if err != nil {
 				result[item] = failResult(err)
 			} else {
-				result[item] = map[string]any{"ok": true, "name": firstString(info, "ServerName", "FriendlyName", "LocalAddress")}
+				payload := map[string]any{"ok": true, "name": firstString(info, "ServerName", "FriendlyName", "LocalAddress")}
+				if strings.TrimSpace(s.EmbyUserID) != "" {
+					if err := validateEmbyUserID(s); err != nil {
+						payload["warning"] = "Emby UserId 不可用，扫描会自动回退到全局 /Items：" + err.Error()
+					} else {
+						payload["userId"] = s.EmbyUserID
+					}
+				}
+				result[item] = payload
 			}
 		case "tmdb":
 			if err := requireFields(s, "tmdbApiKey"); err != nil {
@@ -1147,7 +1155,6 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		return nil, err
 	}
 
-	itemRoute := embyItemsRoute(s)
 	seriesItems := make([]embyItem, 0)
 	movieItems := make([]embyItem, 0)
 	seriesTotal := 0
@@ -1156,39 +1163,22 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	onlySeriesIDs := parseSeriesIDSet(onlySeriesID)
 	fullSeriesScan := maxSeries <= 0 && len(onlySeriesIDs) == 0
 
-	itemStart := 0
-	itemPageLimit := 1000
-	for {
-		var page embyItemsResp
-		if err := embyGet(s, itemRoute, map[string]string{
-			"Recursive":        "true",
-			"IncludeItemTypes": "Series,Movie",
-			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,DateLastSaved,DateLastMediaAdded,RecursiveItemCount,Path",
-			"SortBy":           "SortName",
-			"StartIndex":       strconv.Itoa(itemStart),
-			"Limit":            strconv.Itoa(itemPageLimit),
-		}, &page); err != nil {
-			return nil, err
-		}
-
-		for _, item := range page.Items {
-			switch item.Type {
-			case "Series":
-				seriesTotal++
-				if len(onlySeriesIDs) > 0 && !onlySeriesIDs[item.ID] {
-					continue
-				}
-				seriesItems = append(seriesItems, item)
-			case "Movie":
-				movieTotal++
-				movieItems = append(movieItems, item)
+	allItems, err := loadLibraryItems(s)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range allItems {
+		switch item.Type {
+		case "Series":
+			seriesTotal++
+			if len(onlySeriesIDs) > 0 && !onlySeriesIDs[item.ID] {
+				continue
 			}
+			seriesItems = append(seriesItems, item)
+		case "Movie":
+			movieTotal++
+			movieItems = append(movieItems, item)
 		}
-
-		if len(page.Items) < itemPageLimit {
-			break
-		}
-		itemStart += itemPageLimit
 	}
 	if maxSeries > 0 && maxSeries < len(seriesItems) {
 		fullSeriesScan = false
@@ -2453,6 +2443,65 @@ func embyGet(s settings, route string, query map[string]string, out any) error {
 	query["api_key"] = s.EmbyAPIKey
 	headers := map[string]string{"Accept": "application/json", "X-Emby-Token": s.EmbyAPIKey}
 	return requestJSON(http.MethodGet, buildBaseURL(s.EmbyURL, route, query), headers, nil, out, 45*time.Second)
+}
+
+func validateEmbyUserID(s settings) error {
+	userID := strings.TrimSpace(s.EmbyUserID)
+	if userID == "" {
+		return nil
+	}
+	var page embyItemsResp
+	return embyGet(s, "/Users/"+url.PathEscape(userID)+"/Items", map[string]string{
+		"Recursive":        "true",
+		"IncludeItemTypes": "Series,Movie",
+		"Limit":            "1",
+	}, &page)
+}
+
+func loadLibraryItems(s settings) ([]embyItem, error) {
+	routes := []string{embyItemsRoute(s)}
+	if strings.TrimSpace(s.EmbyUserID) != "" {
+		routes = append(routes, "/Items")
+	}
+	var firstErr error
+	for index, route := range routes {
+		items, err := loadLibraryItemsFromRoute(s, route)
+		if err == nil {
+			if index > 0 {
+				log.Printf("Emby UserId %q 不可用，已回退到全局 /Items", s.EmbyUserID)
+			}
+			return items, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
+}
+
+func loadLibraryItemsFromRoute(s settings, itemRoute string) ([]embyItem, error) {
+	items := make([]embyItem, 0)
+	itemStart := 0
+	itemPageLimit := 1000
+	for {
+		var page embyItemsResp
+		if err := embyGet(s, itemRoute, map[string]string{
+			"Recursive":        "true",
+			"IncludeItemTypes": "Series,Movie",
+			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,DateLastSaved,DateLastMediaAdded,RecursiveItemCount,Path",
+			"SortBy":           "SortName",
+			"StartIndex":       strconv.Itoa(itemStart),
+			"Limit":            strconv.Itoa(itemPageLimit),
+		}, &page); err != nil {
+			return nil, err
+		}
+		items = append(items, page.Items...)
+		if len(page.Items) < itemPageLimit {
+			break
+		}
+		itemStart += itemPageLimit
+	}
+	return items, nil
 }
 
 func embyItemsRoute(s settings) string {
