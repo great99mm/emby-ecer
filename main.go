@@ -776,6 +776,18 @@ type apiError struct {
 
 func (e apiError) Error() string { return e.Err.Error() }
 
+type httpStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e httpStatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("请求失败：HTTP %d", e.Status)
+	}
+	return fmt.Sprintf("请求失败：HTTP %d %s", e.Status, e.Body)
+}
+
 func badRequest(msg string) error {
 	return apiError{Status: http.StatusBadRequest, Err: errors.New(msg)}
 }
@@ -861,9 +873,15 @@ func testConnection(target string, s settings) map[string]any {
 			err := requestJSON(http.MethodGet, buildBaseURL(s.PansouURL, "/api/health", nil), nil, nil, &info, 20*time.Second)
 			if err != nil {
 				result[item] = failResult(err)
-			} else {
-				result[item] = map[string]any{"ok": true, "auth_enabled": info["auth_enabled"], "plugins": info["plugin_count"]}
+				continue
 			}
+			if authEnabled, _ := info["auth_enabled"].(bool); authEnabled {
+				if err := testPanSouAuth(s); err != nil {
+					result[item] = failResult(err)
+					continue
+				}
+			}
+			result[item] = map[string]any{"ok": true, "auth_enabled": info["auth_enabled"], "plugins": info["plugin_count"]}
 		case "p115":
 			if err := requireFields(s, "p115Cookie"); err != nil {
 				result[item] = failResult(err)
@@ -1590,7 +1608,7 @@ func searchKeyword(s settings, keyword string) (map[string]any, error) {
 	headers["Content-Type"] = "application/json"
 	endpoint := buildBaseURL(s.PansouURL, "/api/search", nil)
 	var raw json.RawMessage
-	if err := requestJSON(http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
+	if err := pansouRequestJSON(s, http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
 		return nil, err
 	}
 	var resp pansouSearchResp
@@ -1656,7 +1674,7 @@ func searchMissingEpisode(s settings, missing missingEpisode) (map[string]any, e
 			"ext": map[string]any{"title_en": missing.OriginalTitle, "is_all": true},
 		}
 		var raw json.RawMessage
-		if err := requestJSON(http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
+		if err := pansouRequestJSON(s, http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
 			return nil, err
 		}
 		var resp pansouSearchResp
@@ -1689,6 +1707,9 @@ func normalizePansouResults(resp pansouSearchResp, query string) []normalizedRes
 	// 优先从 merged_by_type 取（遍历所有 key，不再限定 "115"/"oneonefive"）
 	for _, list := range resp.MergedByType {
 		for _, item := range list {
+			if !is115Link(item.URL) {
+				continue
+			}
 			items = append(items, normalizedResult{
 				Title:    firstNonEmpty(item.Note, item.WorkTitle, item.Title, "115 资源"),
 				URL:      item.URL,
@@ -1701,10 +1722,13 @@ func normalizePansouResults(resp pansouSearchResp, query string) []normalizedRes
 		}
 	}
 
-	// merged_by_type 为空时，从 results 兜底（请求已限定 cloud_types，不再过滤 link type）
+	// merged_by_type 为空时，从 results 兜底，并二次过滤真实 115 链接
 	if len(items) == 0 {
 		for _, result := range resp.Results {
 			for _, link := range result.Links {
+				if !is115Link(link.URL) {
+					continue
+				}
 				items = append(items, normalizedResult{
 					Title:    firstNonEmpty(link.WorkTitle, result.Title, "115 资源"),
 					URL:      link.URL,
@@ -1744,10 +1768,15 @@ func linkType(link pansouLinkItem) string {
 	if link.Type != "" {
 		return link.Type
 	}
-	if strings.Contains(link.URL, "115") {
+	if is115Link(link.URL) {
 		return "115"
 	}
 	return ""
+}
+
+func is115Link(rawURL string) bool {
+	rawURL = strings.ToLower(strings.TrimSpace(rawURL))
+	return strings.Contains(rawURL, "115.com/s/") || strings.Contains(rawURL, "115cdn.com/s/") || strings.Contains(rawURL, "anxia.com/s/")
 }
 
 func sourceName(channel string) string {
@@ -1758,10 +1787,10 @@ func sourceName(channel string) string {
 }
 
 func pansouAuthHeaders(s settings) (map[string]string, error) {
-	if s.PansouToken != "" {
-		return map[string]string{"Authorization": "Bearer " + s.PansouToken}, nil
-	}
 	if s.PansouUsername == "" || s.PansouPassword == "" {
+		if s.PansouToken != "" {
+			return map[string]string{"Authorization": "Bearer " + s.PansouToken}, nil
+		}
 		return map[string]string{}, nil
 	}
 	pansouToken.Lock()
@@ -1786,6 +1815,49 @@ func pansouAuthHeaders(s settings) (map[string]string, error) {
 		pansouToken.ExpiresAt = time.Now().Add(time.Hour)
 	}
 	return map[string]string{"Authorization": "Bearer " + loginResp.Token}, nil
+}
+
+func testPanSouAuth(s settings) error {
+	payload := map[string]any{
+		"kw":          "test",
+		"res":         "merge",
+		"src":         "all",
+		"cloud_types": []string{"115"},
+		"filter": map[string]any{
+			"include": []string{},
+			"exclude": []string{},
+		},
+	}
+	headers, err := pansouAuthHeaders(s)
+	if err != nil {
+		return err
+	}
+	headers["Content-Type"] = "application/json"
+	var raw json.RawMessage
+	return pansouRequestJSON(s, http.MethodPost, buildBaseURL(s.PansouURL, "/api/search", nil), headers, payload, &raw, 8*time.Second)
+}
+
+func pansouRequestJSON(s settings, method, endpoint string, headers map[string]string, body any, out any, timeout time.Duration) error {
+	err := requestJSON(method, endpoint, headers, body, out, timeout)
+	if !isAuthHTTPStatus(err) || s.PansouUsername == "" || s.PansouPassword == "" {
+		return err
+	}
+	clearPanSouTokenCache()
+	s.PansouToken = ""
+	headers, authErr := pansouAuthHeaders(s)
+	if authErr != nil {
+		return authErr
+	}
+	headers["Content-Type"] = "application/json"
+	return requestJSON(method, endpoint, headers, body, out, timeout)
+}
+
+func isAuthHTTPStatus(err error) bool {
+	var statusErr httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.Status == http.StatusUnauthorized || statusErr.Status == http.StatusForbidden
 }
 
 func clearPanSouTokenCache() {
@@ -1866,9 +1938,12 @@ func transfer115(s settings, body transferRequest) (transferResult, error) {
 	form.Set("share_code", shareCode)
 	form.Set("receive_code", receiveCode)
 	form.Set("file_id", strings.Join(fileIDs, ","))
+	if userID := userIDFrom115Cookie(s.P115Cookie); userID != "" {
+		form.Set("user_id", userID)
+	}
 	var resp map[string]any
 	if err := requestForm("https://webapi.115.com/share/receive", headers115(s.P115Cookie, true), form, &resp, 35*time.Second); err != nil {
-		return transferResult{}, err
+		return transferResult{}, fmt.Errorf("115 转存请求失败：%w", err)
 	}
 	if state, _ := resp["state"].(bool); !state {
 		return transferResult{}, errors.New(getErrorMessage(resp, "115 转存失败"))
@@ -2366,7 +2441,7 @@ func requestJSON(method, endpoint string, headers map[string]string, body any, o
 		client.Timeout = timeout
 		resp, err := client.Do(req)
 		if err != nil {
-			if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") || strings.Contains(err.Error(), "Timeout") {
+			if isTimeoutError(err) {
 				lastErr = fmt.Errorf("请求超时（%v），正在重试(%d/3)...", timeout, attempt)
 				continue
 			}
@@ -2379,7 +2454,7 @@ func requestJSON(method, endpoint string, headers map[string]string, body any, o
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("请求失败：HTTP %d %s", resp.StatusCode, shortBody(raw))
+			return httpStatusError{Status: resp.StatusCode, Body: shortBody(raw)}
 		}
 		if out == nil {
 			return nil
@@ -2415,9 +2490,20 @@ func requestForm(endpoint string, headers map[string]string, form url.Values, ou
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("请求失败：HTTP %d %s", resp.StatusCode, shortBody(raw))
+		return httpStatusError{Status: resp.StatusCode, Body: shortBody(raw)}
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	text := err.Error()
+	return strings.Contains(text, "timeout") || strings.Contains(text, "deadline") || strings.Contains(text, "Timeout")
 }
 
 func headers115(cookie string, form bool) map[string]string {
@@ -2431,6 +2517,26 @@ func headers115(cookie string, form bool) map[string]string {
 		headers["Content-Type"] = "application/x-www-form-urlencoded"
 	}
 	return headers
+}
+
+func extractCookieValue(cookie, name string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		key, value, ok := strings.Cut(part, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func userIDFrom115Cookie(cookie string) string {
+	uid := extractCookieValue(cookie, "UID")
+	if uid == "" {
+		return ""
+	}
+	userID, _, _ := strings.Cut(uid, "_")
+	return strings.TrimSpace(userID)
 }
 
 func buildBaseURL(base, route string, query map[string]string) string {
@@ -3539,7 +3645,8 @@ func handleMPDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func mpDownload(s settings, rawData map[string]any, tmdbID string) error {
-	client := &http.Client{Timeout: 30 * time.Second}
+	timeout := time.Duration(getenvInt("MP_DOWNLOAD_TIMEOUT_SECONDS", 90)) * time.Second
+	client := &http.Client{Timeout: timeout}
 	mpURL := s.MPUrl
 	payload := map[string]any{"torrent_in": rawData}
 	if tmdbID != "" {
@@ -3551,6 +3658,9 @@ func mpDownload(s settings, rawData map[string]any, tmdbID string) error {
 	req.Header.Set("x-api-key", s.MPToken)
 	resp, err := client.Do(req)
 	if err != nil {
+		if isTimeoutError(err) {
+			return fmt.Errorf("MoviePilot 下载提交超时（%s）：MoviePilot 没有及时返回，请检查 %s 是否卡住或把 MP_DOWNLOAD_TIMEOUT_SECONDS 调大", timeout, mpURL)
+		}
 		return fmt.Errorf("MoviePilot 下载失败：%w", err)
 	}
 	defer resp.Body.Close()

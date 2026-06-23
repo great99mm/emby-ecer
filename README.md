@@ -35,6 +35,10 @@ docker run -d --name emby-ecer -p 3000:3000 \
 
 也可以全部通过环境变量注入。
 
+常用环境变量：
+- `PANSOU_URL` / `PANSOU_USERNAME` / `PANSOU_PASSWORD`：PanSou 开启认证时建议配置账号密码，token 过期后会自动重登
+- `MP_DOWNLOAD_TIMEOUT_SECONDS`：MoviePilot 下载提交超时，默认 `90`
+
 ## 技术栈
 
 - 后端：Go
