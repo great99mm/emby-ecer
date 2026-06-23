@@ -339,12 +339,27 @@ func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err)
 		return
 	}
-	defer syncHDHiveCookie(client)
+	activeClient := client
 	unlocked, err := client.Unlock(body.Slug)
 	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
+		if isHDHiveTokenError(err) && hasHDHiveCredentials(settingsSnapshot) {
+			syncHDHiveCookie(client)
+			refreshedClient, refreshErr := refreshHDHiveLogin(settingsSnapshot)
+			if refreshErr != nil {
+				writeError(w, statusFromError(refreshErr), fmt.Errorf("HDHive token 失效，自动登录失败：%w", refreshErr))
+				return
+			}
+			unlocked, err = refreshedClient.Unlock(body.Slug)
+			activeClient = refreshedClient
+			syncHDHiveCookie(refreshedClient)
+		}
+		if err != nil {
+			syncHDHiveCookie(activeClient)
+			writeError(w, statusFromError(err), err)
+			return
+		}
 	}
+	syncHDHiveCookie(activeClient)
 	if !is115Link(unlocked.URL) {
 		writeError(w, http.StatusBadGateway, errors.New("HDHive 解锁后未返回 115 链接"))
 		return
@@ -538,6 +553,18 @@ func newAuthenticatedHDHiveClient(s settings) (*hdhiveClient, error) {
 		}
 		syncHDHiveCookie(client)
 	}
+	return client, nil
+}
+
+func refreshHDHiveLogin(s settings) (*hdhiveClient, error) {
+	if !hasHDHiveCredentials(s) {
+		return nil, badRequest("HDHive token 失效，请先在授权页填写用户名和密码")
+	}
+	client := newHDHiveClient(settings{HDHiveURL: s.HDHiveURL, HDHiveUsername: s.HDHiveUsername, HDHivePassword: s.HDHivePassword})
+	if _, err := client.Login(s.HDHiveUsername, s.HDHivePassword); err != nil {
+		return nil, err
+	}
+	syncHDHiveCookie(client)
 	return client, nil
 }
 
@@ -868,6 +895,31 @@ func serializeCookieHeader(pairs map[string]string) string {
 func isHDHiveActionTokenInvalid(raw []byte) bool {
 	text := strings.ToLower(string(raw))
 	return strings.Contains(text, "action_token_invalid") || strings.Contains(text, "action_token_required")
+}
+
+func isHDHiveTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	markers := []string{
+		"action_token_invalid",
+		"action_token_required",
+		"access_token_invalid",
+		"access_token_required",
+		"token_invalid",
+		"token_expired",
+		"jwt",
+		"未登录",
+		"登录",
+		"刷新页面后重试",
+	}
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func mapHDHiveResource(row map[string]any, index int) hdhiveResource {
