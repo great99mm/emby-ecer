@@ -246,6 +246,40 @@ func handleHDHiveSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"query": strings.TrimSpace(body.Keyword), "total": len(results), "results": results})
 }
 
+func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Slug  string `json:"slug"`
+		Title string `json:"title"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := requireFields(store.Get(), "hdhiveCookie"); err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	client := newHDHiveClient(store.Get())
+	unlocked, err := client.Unlock(body.Slug)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	if !is115Link(unlocked.URL) {
+		writeError(w, http.StatusBadGateway, errors.New("HDHive 解锁后未返回 115 链接"))
+		return
+	}
+	result := normalizedResult{
+		Title:        firstNonEmpty(body.Title, unlocked.ResourceName, unlocked.Title, "HDHive 资源"),
+		URL:          unlocked.URL,
+		Password:     firstNonEmpty(unlocked.Password, extractPassword(unlocked.URL)),
+		Source:       "HDHive",
+		HDHiveSlug:   strings.TrimSpace(body.Slug),
+		HDHiveLocked: false,
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": result})
+}
+
 func runSubscriptions(s settings, ids []string) (subscriptionRunResult, error) {
 	if !beginSubscriptionRun() {
 		return subscriptionRunResult{}, badRequest("订阅扫描正在运行")
@@ -325,26 +359,23 @@ func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) (
 	}
 	results := make([]normalizedResult, 0, len(resources))
 	for _, item := range resources {
-		if item.URL == "" && item.Slug != "" {
-			if unlocked, unlockErr := client.Unlock(item.Slug); unlockErr == nil && unlocked.URL != "" {
-				item.URL = unlocked.URL
-				item.Password = firstNonEmpty(item.Password, unlocked.Password)
-			}
-		}
 		if item.URL != "" && !is115Link(item.URL) {
 			continue
 		}
 		title := firstNonEmpty(item.ResourceName, item.Title, "HDHive 资源") + formatHDHiveMeta(item)
 		if item.URL == "" {
-			title += "｜未获取到115链接"
+			title += "｜需解锁"
 		}
 		results = append(results, normalizedResult{
-			Title:    title,
-			URL:      item.URL,
-			Password: firstNonEmpty(item.Password, extractPassword(item.URL)),
-			Source:   "HDHive",
-			Datetime: item.CreatedAt,
-			Query:    strings.TrimSpace(keyword),
+			Title:        title,
+			URL:          item.URL,
+			Password:     firstNonEmpty(item.Password, extractPassword(item.URL)),
+			Source:       "HDHive",
+			Datetime:     item.CreatedAt,
+			Query:        strings.TrimSpace(keyword),
+			HDHiveSlug:   item.Slug,
+			HDHiveLocked: item.URL == "" && item.Slug != "",
+			UnlockPoints: item.UnlockPoints,
 		})
 		if len(results) >= 30 {
 			break

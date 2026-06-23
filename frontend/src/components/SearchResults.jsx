@@ -1,11 +1,13 @@
+import { useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Download } from 'lucide-react';
+import { Download, Unlock } from 'lucide-react';
 
 export default function SearchResults({ search }) {
   const transfers = useStore(s => s.transfers);
   const setTransfer = useStore(s => s.setTransfer);
+  const [unlockedResults, setUnlockedResults] = useState({});
 
   if (!search) return null;
   if (search.loading) return <p className="text-sm text-gray-400 py-3 text-center">搜索中...</p>;
@@ -51,6 +53,24 @@ export default function SearchResults({ search }) {
     }
   };
 
+  const doHDHiveUnlock = async (result, index) => {
+    const key = `${search.query || 's'}:${index}`;
+    setTransfer(key, { loading: true });
+    try {
+      const data = await api('/api/hdhive/unlock', {
+        method: 'POST',
+        body: JSON.stringify({ slug: result.hdhiveSlug, title: result.title }),
+      });
+      const unlocked = { ...result, ...(data.result || {}), hdhiveLocked: false };
+      setUnlockedResults(prev => ({ ...prev, [key]: unlocked }));
+      setTransfer(key, {});
+      toast.success('HDHive 解锁成功，可转存');
+    } catch (err) {
+      setTransfer(key, { error: err.message });
+      toast.error(err.message);
+    }
+  };
+
   // 裁剪标题：去掉评分/类型/地区/语言/主演/简介，只留名称+大小
   const cleanTitle = (raw) => {
     if (!raw) return { title: '', size: '' };
@@ -75,12 +95,14 @@ export default function SearchResults({ search }) {
     <div className="mt-3 space-y-2">
       <p className="text-xs font-bold text-gray-400">搜索结果 · {search.results.length} 条</p>
       {search.results.map((result, index) => {
+        const key = `${search.query || 's'}:${index}`;
+        result = unlockedResults[key] || result;
         const { title, size } = cleanTitle(result.title);
         const info = matchInfo(result);
         const matched = info.matched;
-        const key = `${search.query || 's'}:${index}`;
         const t = transfers[key];
         const hasUrl = !!result.url;
+        const canUnlock = result.source === 'HDHive' && result.hdhiveSlug && (result.hdhiveLocked || !hasUrl);
 
         return (
           <div key={index} className={`rounded-md bg-gray-50 p-3 border ${matched ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-100'}`}>
@@ -97,8 +119,17 @@ export default function SearchResults({ search }) {
                 <span className="shrink-0 text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">已转存</span>
               ) : t?.error ? (
                 <span className="shrink-0 text-xs text-red-500">{t.error}</span>
+              ) : canUnlock ? (
+                <button
+                  onClick={() => doHDHiveUnlock(result, index)}
+                  disabled={t?.loading}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-100 transition-colors disabled:opacity-50"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  {t?.loading ? '解锁中' : `解锁${result.unlockPoints ? ` ${result.unlockPoints}积分` : ''}`}
+                </button>
               ) : !hasUrl ? (
-                <span className="shrink-0 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-1 rounded">待解锁</span>
+                <span className="shrink-0 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-1 rounded">无链接</span>
               ) : (
                 <button
                   onClick={() => doTransfer(result, index)}

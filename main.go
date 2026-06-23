@@ -402,6 +402,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 	case r.URL.Path == "/api/hdhive/search" && r.Method == http.MethodPost:
 		handleHDHiveSearch(w, r)
 
+	case r.URL.Path == "/api/hdhive/unlock" && r.Method == http.MethodPost:
+		handleHDHiveUnlock(w, r)
+
 	case r.URL.Path == "/api/subscriptions" && r.Method == http.MethodGet:
 		handleListSubscriptions(w, r)
 
@@ -1663,13 +1666,16 @@ type pansouResult struct {
 }
 
 type normalizedResult struct {
-	Title    string   `json:"title"`
-	URL      string   `json:"url"`
-	Password string   `json:"password"`
-	Source   string   `json:"source"`
-	Datetime string   `json:"datetime"`
-	Images   []string `json:"images"`
-	Query    string   `json:"query"`
+	Title        string   `json:"title"`
+	URL          string   `json:"url"`
+	Password     string   `json:"password"`
+	Source       string   `json:"source"`
+	Datetime     string   `json:"datetime"`
+	Images       []string `json:"images"`
+	Query        string   `json:"query"`
+	HDHiveSlug   string   `json:"hdhiveSlug,omitempty"`
+	HDHiveLocked bool     `json:"hdhiveLocked,omitempty"`
+	UnlockPoints int      `json:"unlockPoints,omitempty"`
 }
 
 func searchKeyword(s settings, keyword string) (map[string]any, error) {
@@ -1837,10 +1843,13 @@ func dedupeNormalizedResults(items []normalizedResult, limit int) []normalizedRe
 	seen := map[string]bool{}
 	out := make([]normalizedResult, 0)
 	for _, item := range items {
-		if item.URL == "" {
+		key := item.URL + "|" + item.Password
+		if item.URL == "" && item.HDHiveSlug != "" {
+			key = "hdhive:" + item.HDHiveSlug
+		}
+		if key == "|" || key == "" {
 			continue
 		}
-		key := item.URL + "|" + item.Password
 		if seen[key] {
 			continue
 		}
