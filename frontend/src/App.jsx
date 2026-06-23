@@ -7,6 +7,7 @@ import Login from './pages/Login';
 import Home from './pages/Home';
 import Missing from './pages/Missing';
 import Settings from './pages/Settings';
+import Subscriptions from './pages/Subscriptions';
 
 function JobPoller() {
   const activeJobId = useStore(s => s.activeJobId);
@@ -95,6 +96,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/missing" element={<Missing />} />
+        <Route path="/subscriptions" element={<Subscriptions />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -1,10 +1,11 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import useStore from '../store';
-import { LogOut, Home, AlertTriangle, SlidersHorizontal, Clapperboard } from 'lucide-react';
+import { LogOut, Home, AlertTriangle, SlidersHorizontal, Clapperboard, Timer } from 'lucide-react';
 
 const tabs = [
   { path: '/', label: '首页', icon: Home },
   { path: '/missing', label: '缺集', icon: AlertTriangle },
+  { path: '/subscriptions', label: '订阅', icon: Timer },
   { path: '/settings', label: '授权', icon: SlidersHorizontal },
 ];
 

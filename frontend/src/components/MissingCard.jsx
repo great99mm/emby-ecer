@@ -2,7 +2,7 @@ import { useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Search, Download, X, RefreshCw } from 'lucide-react';
+import { Search, Download, X, RefreshCw, Sparkles } from 'lucide-react';
 import SearchResults from './SearchResults';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
@@ -48,6 +48,20 @@ export default function MissingCard({ group, selectable = false, selected = fals
       setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, results: data.results || [], query: data.query, codes }));
     } catch (err) {
       setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, error: err.message, codes }));
+    }
+  };
+
+  const doHDHiveSearch = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: true, codes }));
+    try {
+      const data = await api('/api/hdhive/search', {
+        method: 'POST',
+        body: JSON.stringify({ keyword: group.title, mediaType: 'tv', tmdbId: group.tmdbId || 0 }),
+      });
+      const previous = search?.results || [];
+      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, results: [...(prev?.results || previous), ...(data.results || [])], query: group.title, codes }));
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, error: err.message, codes }));
     }
   };
 
@@ -190,9 +204,12 @@ export default function MissingCard({ group, selectable = false, selected = fals
                 <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
               </div>
             </div>
-            <div className="px-4 py-3 grid grid-cols-2 gap-2">
+            <div className="px-4 py-3 grid grid-cols-3 gap-2">
               <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
                 <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP中' : 'MP搜索'}
+              </button>
+              <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
+                <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? '蜂巢中' : 'HDHive'}
               </button>
               <button type="button" onClick={doSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-md bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
                 <Search className="w-4 h-4" /> {search?.loading ? '盘搜中' : '盘搜搜索'}
@@ -205,6 +222,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
                 </div>
               )}
               {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
+              {search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
               {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
 
               {/* MP 结果统计 */}

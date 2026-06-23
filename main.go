@@ -39,6 +39,7 @@ var (
 	activeScanMu    sync.Mutex
 	activeScanJobID string
 	httpCli         = &http.Client{Timeout: 45 * time.Second}
+	subStore        *subscriptionStore
 
 	pansouToken = struct {
 		sync.Mutex
@@ -239,6 +240,14 @@ type settings struct {
 	P115TargetCID   string `json:"p115TargetCid"`
 	MPUrl           string `json:"mpUrl"`
 	MPToken         string `json:"mpToken"`
+	HDHiveURL       string `json:"hdhiveUrl"`
+	HDHiveCookie    string `json:"hdhiveCookie"`
+	SubEnabled      bool   `json:"subEnabled"`
+	SubInterval     int    `json:"subInterval"`
+	SubAutoTransfer bool   `json:"subAutoTransfer"`
+	OpenAIBaseURL   string `json:"openaiBaseUrl"`
+	OpenAIAPIKey    string `json:"openaiApiKey"`
+	OpenAIModel     string `json:"openaiModel"`
 }
 
 type settingsStore struct {
@@ -298,6 +307,8 @@ func main() {
 	tmdbCache = newTMDBCacheStore(getenv("TMDB_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "tmdb-cache.json")), time.Duration(getenvInt("TMDB_CACHE_TTL_HOURS", 24))*time.Hour)
 	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
 	jobMgr = newJobManager(getenv("JOB_STATE_PATH", filepath.Join(filepath.Dir(configPath), "jobs.json")))
+	subStore = newSubscriptionStore(getenv("SUBSCRIPTIONS_PATH", filepath.Join(filepath.Dir(configPath), "subscriptions.json")))
+	startSubscriptionScheduler()
 
 	port := getenv("PORT", "3000")
 	server := &http.Server{
@@ -387,6 +398,21 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			body.Target = "all"
 		}
 		writeJSON(w, http.StatusOK, testConnection(body.Target, store.Get()))
+
+	case r.URL.Path == "/api/hdhive/search" && r.Method == http.MethodPost:
+		handleHDHiveSearch(w, r)
+
+	case r.URL.Path == "/api/subscriptions" && r.Method == http.MethodGet:
+		handleListSubscriptions(w, r)
+
+	case r.URL.Path == "/api/subscriptions" && r.Method == http.MethodPost:
+		handleSaveSubscription(w, r)
+
+	case r.URL.Path == "/api/subscriptions/delete" && r.Method == http.MethodPost:
+		handleDeleteSubscription(w, r)
+
+	case r.URL.Path == "/api/subscriptions/run" && r.Method == http.MethodPost:
+		handleRunSubscriptions(w, r)
 
 	case r.URL.Path == "/api/scan/last" && r.Method == http.MethodGet:
 		result, err := loadScanResult()
@@ -531,6 +557,16 @@ func settingsFromEnv() settings {
 		PansouToken:     os.Getenv("PANSOU_TOKEN"),
 		P115Cookie:      os.Getenv("P115_COOKIE"),
 		P115TargetCID:   getenv("P115_TARGET_CID", "0"),
+		MPUrl:           os.Getenv("MP_URL"),
+		MPToken:         os.Getenv("MP_TOKEN"),
+		HDHiveURL:       getenv("HDHIVE_URL", defaultHDHiveURL),
+		HDHiveCookie:    os.Getenv("HDHIVE_COOKIE"),
+		SubEnabled:      getenvBool("SUBSCRIPTION_ENABLED", false),
+		SubInterval:     getenvInt("SUBSCRIPTION_INTERVAL_HOURS", 6),
+		SubAutoTransfer: getenvBool("SUBSCRIPTION_AUTO_TRANSFER", false),
+		OpenAIBaseURL:   getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel:     getenv("OPENAI_MODEL", "gpt-4o-mini"),
 	}
 }
 
@@ -589,6 +625,24 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	})
 	setPlain("mpUrl", func(v string) { next.MPUrl = strings.TrimRight(v, "/") })
 	setSecret("mpToken", func(v string) { next.MPToken = v })
+	setPlain("hdhiveUrl", func(v string) {
+		if v == "" {
+			v = defaultHDHiveURL
+		}
+		next.HDHiveURL = strings.TrimRight(v, "/")
+	})
+	setSecret("hdhiveCookie", func(v string) { next.HDHiveCookie = v })
+	setPlain("subEnabled", func(v string) { next.SubEnabled = parseBool(v) })
+	setPlain("subInterval", func(v string) { next.SubInterval = clampIntervalHours(parseInt(v)) })
+	setPlain("subAutoTransfer", func(v string) { next.SubAutoTransfer = parseBool(v) })
+	setPlain("openaiBaseUrl", func(v string) {
+		if v == "" {
+			v = "https://api.openai.com/v1"
+		}
+		next.OpenAIBaseURL = strings.TrimRight(v, "/")
+	})
+	setSecret("openaiApiKey", func(v string) { next.OpenAIAPIKey = v })
+	setPlain("openaiModel", func(v string) { next.OpenAIModel = v })
 
 	if next.PansouURL == "" {
 		next.PansouURL = defaultPanSouURL
@@ -596,6 +650,16 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	if next.P115TargetCID == "" {
 		next.P115TargetCID = "0"
 	}
+	if next.HDHiveURL == "" {
+		next.HDHiveURL = defaultHDHiveURL
+	}
+	if next.OpenAIBaseURL == "" {
+		next.OpenAIBaseURL = "https://api.openai.com/v1"
+	}
+	if next.OpenAIModel == "" {
+		next.OpenAIModel = "gpt-4o-mini"
+	}
+	next.SubInterval = clampIntervalHours(next.SubInterval)
 	next.ScanConcurrency = clampScanConcurrency(next.ScanConcurrency)
 
 	s.data = next
@@ -621,12 +685,22 @@ func maskSettings(s settings) map[string]any {
 		"p115TargetCid":   fallback(s.P115TargetCID, "0"),
 		"mpUrl":           s.MPUrl,
 		"mpToken":         maskSecret(s.MPToken, 4),
+		"hdhiveUrl":       fallback(s.HDHiveURL, defaultHDHiveURL),
+		"hdhiveCookie":    maskSecret(s.HDHiveCookie, 12),
+		"subEnabled":      s.SubEnabled,
+		"subInterval":     clampIntervalHours(s.SubInterval),
+		"subAutoTransfer": s.SubAutoTransfer,
+		"openaiBaseUrl":   fallback(s.OpenAIBaseURL, "https://api.openai.com/v1"),
+		"openaiApiKey":    maskSecret(s.OpenAIAPIKey, 4),
+		"openaiModel":     fallback(s.OpenAIModel, "gpt-4o-mini"),
 		"ready": map[string]bool{
 			"emby":   s.EmbyURL != "" && s.EmbyAPIKey != "",
 			"tmdb":   s.TMDBAPIKey != "",
 			"pansou": s.PansouURL != "",
 			"p115":   s.P115Cookie != "",
 			"mp":     s.MPUrl != "" && s.MPToken != "",
+			"hdhive": s.HDHiveURL != "" && s.HDHiveCookie != "",
+			"llm":    s.OpenAIBaseURL != "" && s.OpenAIAPIKey != "" && s.OpenAIModel != "",
 		},
 	}
 }
@@ -824,6 +898,10 @@ func requireFields(s settings, fields ...string) error {
 			if s.P115Cookie == "" {
 				missing = append(missing, field)
 			}
+		case "hdhiveCookie":
+			if s.HDHiveCookie == "" {
+				missing = append(missing, field)
+			}
 		}
 	}
 	if len(missing) > 0 {
@@ -835,7 +913,7 @@ func requireFields(s settings, fields ...string) error {
 func testConnection(target string, s settings) map[string]any {
 	targets := []string{target}
 	if target == "all" {
-		targets = []string{"emby", "tmdb", "pansou", "p115"}
+		targets = []string{"emby", "tmdb", "pansou", "p115", "hdhive", "llm"}
 	}
 	result := map[string]any{}
 	for _, item := range targets {
@@ -897,6 +975,27 @@ func testConnection(target string, s settings) map[string]any {
 				result[item] = failResult(errors.New(getErrorMessage(info, "Cookie 无效")))
 			} else {
 				result[item] = map[string]any{"ok": true, "name": "115 用户"}
+			}
+		case "hdhive":
+			if err := requireFields(s, "hdhiveCookie"); err != nil {
+				result[item] = failResult(err)
+				continue
+			}
+			info, err := newHDHiveClient(s).CheckConnection()
+			if err != nil {
+				result[item] = failResult(err)
+			} else {
+				result[item] = map[string]any{"ok": true, "name": firstString(info, "nickname", "username"), "points": info["points"]}
+			}
+		case "llm":
+			if s.OpenAIBaseURL == "" || s.OpenAIAPIKey == "" || s.OpenAIModel == "" {
+				result[item] = failResult(errors.New("请先配置 OpenAI 兼容 Base URL、API Key 和模型"))
+				continue
+			}
+			if err := testOpenAICompatible(s); err != nil {
+				result[item] = failResult(err)
+			} else {
+				result[item] = map[string]any{"ok": true, "model": s.OpenAIModel}
 			}
 		}
 	}

@@ -1,13 +1,13 @@
 FROM golang:1.22-alpine AS gobuilder
 WORKDIR /src
 COPY go.mod ./
-COPY main.go ./
+COPY *.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/emby-ecer .
 
-FROM node:20-alpine AS webbuilder
+FROM node:20.20-alpine AS webbuilder
 WORKDIR /app
-COPY frontend/package.json ./
-RUN npm install --legacy-peer-deps 2>&1 || npm install
+COPY frontend/package*.json ./
+RUN npm ci --legacy-peer-deps 2>&1 || npm install --legacy-peer-deps 2>&1 || npm install
 COPY frontend/ ./
 RUN npm run build
 

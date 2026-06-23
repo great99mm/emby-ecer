@@ -2,9 +2,9 @@ import { useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Save, Shield, Server, BadgeCheck, Search, CloudUpload, KeyRound, Download } from 'lucide-react';
+import { Save, Shield, Server, BadgeCheck, Search, CloudUpload, KeyRound, Download, Sparkles, Bot, Timer } from 'lucide-react';
 
-const sectionIcons = { Emby: Server, TMDB: BadgeCheck, PanSou: Search, '115 转存': CloudUpload, MoviePilot: Download, '账号安全': Shield };
+const sectionIcons = { Emby: Server, TMDB: BadgeCheck, PanSou: Search, HDHive: Sparkles, '115 转存': CloudUpload, MoviePilot: Download, '订阅扫描': Timer, '大模型识别': Bot, '账号安全': Shield };
 
 function AuthSection({ title, icon, children, ready, onTest, target }) {
   const Icon = icon;
@@ -43,6 +43,15 @@ function Input({ name, label, value, onChange, type = 'text', placeholder = '' }
         placeholder={placeholder}
         className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
       />
+    </label>
+  );
+}
+
+function Checkbox({ name, label, checked, onChange }) {
+  return (
+    <label className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-700">
+      <input name={name} type="checkbox" checked={!!checked} onChange={onChange} className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" />
+      {label}
     </label>
   );
 }
@@ -137,6 +146,11 @@ export default function Settings() {
         <Input name="pansouToken" label="PanSou Token (可选)" value={get('pansouToken')} onChange={e => update('pansouToken', e.target.value)} type="password" placeholder="有 token 可直接填" />
       </AuthSection>
 
+      <AuthSection title="HDHive" icon={sectionIcons.HDHive} ready={ready.hdhive} onTest={testConnection} target="hdhive">
+        <Input name="hdhiveUrl" label="HDHive 地址" value={get('hdhiveUrl')} onChange={e => update('hdhiveUrl', e.target.value)} placeholder="https://hdhive.com" />
+        <Textarea name="hdhiveCookie" label="HDHive Cookie" value={get('hdhiveCookie')} onChange={e => update('hdhiveCookie', e.target.value)} placeholder="粘贴 HDHive 网页 Cookie；留空表示不覆盖" />
+      </AuthSection>
+
       <AuthSection title="115 转存" icon={sectionIcons['115 转存']} ready={ready.p115} onTest={testConnection} target="p115">
         <Textarea name="p115Cookie" label="115 Cookie" value={get('p115Cookie')} onChange={e => update('p115Cookie', e.target.value)} placeholder="粘贴网页版 Cookie；留空表示不覆盖" />
         <Input name="p115TargetCid" label="目标目录 CID" value={get('p115TargetCid')} onChange={e => update('p115TargetCid', e.target.value)} placeholder="0" />
@@ -145,6 +159,18 @@ export default function Settings() {
       <AuthSection title="MoviePilot" icon={sectionIcons.MoviePilot} ready={ready.mp}>
         <Input name="mpUrl" label="MoviePilot 地址" value={get('mpUrl')} onChange={e => update('mpUrl', e.target.value)} placeholder="http://IP:3001" />
         <Input name="mpToken" label="API Token" value={get('mpToken')} onChange={e => update('mpToken', e.target.value)} type="password" placeholder="在 MP 设置 → API 获取" />
+      </AuthSection>
+
+      <AuthSection title="订阅扫描" icon={sectionIcons['订阅扫描']} ready={settings.subEnabled}>
+        <Checkbox name="subEnabled" label="启用订阅自动扫描" checked={get('subEnabled') === true || get('subEnabled') === 'true'} onChange={e => update('subEnabled', e.target.checked)} />
+        <Checkbox name="subAutoTransfer" label="订阅命中后自动转存 115" checked={get('subAutoTransfer') === true || get('subAutoTransfer') === 'true'} onChange={e => update('subAutoTransfer', e.target.checked)} />
+        <Input name="subInterval" label="自动扫描间隔（小时）" value={get('subInterval')} onChange={e => update('subInterval', e.target.value)} type="number" placeholder="默认 6，最大 168" />
+      </AuthSection>
+
+      <AuthSection title="大模型识别" icon={sectionIcons['大模型识别']} ready={ready.llm} onTest={testConnection} target="llm">
+        <Input name="openaiBaseUrl" label="OpenAI 兼容 Base URL" value={get('openaiBaseUrl')} onChange={e => update('openaiBaseUrl', e.target.value)} placeholder="https://api.openai.com/v1" />
+        <Input name="openaiModel" label="模型名称" value={get('openaiModel')} onChange={e => update('openaiModel', e.target.value)} placeholder="gpt-4o-mini" />
+        <Input name="openaiApiKey" label="API Key" value={get('openaiApiKey')} onChange={e => update('openaiApiKey', e.target.value)} type="password" placeholder="留空表示不覆盖" />
       </AuthSection>
 
       <AuthSection title="账号安全" icon={sectionIcons['账号安全']}>
