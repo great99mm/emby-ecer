@@ -508,25 +508,10 @@ func (c *hdhiveClient) Unlock(slug string) (hdhiveResource, error) {
 	if err != nil || actionID == "" {
 		return hdhiveResource{}, firstErr(err, errors.New("未找到 HDHive unlockResource action"))
 	}
-	_ = c.prefetchActionToken()
 	body, _ := json.Marshal([]string{slug})
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+pagePath, bytes.NewReader(body))
+	responseRaw, err := c.postHDHiveAction(pagePath, actionID, body)
 	if err != nil {
 		return hdhiveResource{}, err
-	}
-	c.setHeaders(req, "text/x-component")
-	req.Header.Set("Origin", c.baseURL)
-	req.Header.Set("Referer", c.baseURL+pagePath)
-	req.Header.Set("Next-Action", actionID)
-	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return hdhiveResource{}, err
-	}
-	defer resp.Body.Close()
-	responseRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if resp.StatusCode >= 400 {
-		return hdhiveResource{}, fmt.Errorf("HDHive 解锁失败：HTTP %d %s", resp.StatusCode, shortBody(responseRaw))
 	}
 	share := extractHDHiveShareLink(string(responseRaw))
 	if share == "" {
@@ -536,6 +521,35 @@ func (c *hdhiveClient) Unlock(slug string) (hdhiveResource, error) {
 		return hdhiveResource{}, errors.New("HDHive 解锁后未返回 115 链接")
 	}
 	return hdhiveResource{Slug: slug, URL: share, Password: extractPassword(share)}, nil
+}
+
+func (c *hdhiveClient) postHDHiveAction(pagePath, actionID string, body []byte) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		_ = c.prefetchActionToken()
+		req, err := http.NewRequest(http.MethodPost, c.baseURL+pagePath, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		c.setHeaders(req, "text/x-component")
+		req.Header.Set("Origin", c.baseURL)
+		req.Header.Set("Referer", c.baseURL+pagePath)
+		req.Header.Set("Next-Action", actionID)
+		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		responseRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			return responseRaw, nil
+		}
+		if attempt == 0 && isHDHiveActionTokenInvalid(responseRaw) {
+			continue
+		}
+		return nil, fmt.Errorf("HDHive 解锁失败：HTTP %d %s", resp.StatusCode, shortBody(responseRaw))
+	}
+	return nil, errors.New("HDHive 解锁失败：action token 刷新后仍无效")
 }
 
 func (c *hdhiveClient) fetchText(path string) (string, error) {
@@ -590,9 +604,63 @@ func (c *hdhiveClient) prefetchActionToken() error {
 func (c *hdhiveClient) setHeaders(req *http.Request, accept string) {
 	req.Header.Set("User-Agent", hdhiveUserAgent)
 	req.Header.Set("Accept", accept)
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
+	if cookieHeader := c.cookieHeader(); cookieHeader != "" {
+		req.Header.Set("Cookie", cookieHeader)
 	}
+}
+
+func (c *hdhiveClient) cookieHeader() string {
+	pairs := parseCookieHeader(c.cookie)
+	if c.client != nil && c.client.Jar != nil {
+		if base, err := url.Parse(c.baseURL); err == nil {
+			for _, cookie := range c.client.Jar.Cookies(base) {
+				if cookie.Name != "" {
+					pairs[cookie.Name] = cookie.Value
+				}
+			}
+		}
+	}
+	return serializeCookieHeader(pairs)
+}
+
+func parseCookieHeader(header string) map[string]string {
+	pairs := map[string]string{}
+	for _, part := range strings.Split(header, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" || !strings.Contains(part, "=") {
+			continue
+		}
+		name, value, _ := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		pairs[name] = strings.TrimSpace(value)
+	}
+	return pairs
+}
+
+func serializeCookieHeader(pairs map[string]string) string {
+	if len(pairs) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(pairs))
+	for key := range pairs {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+pairs[key])
+	}
+	return strings.Join(parts, "; ")
+}
+
+func isHDHiveActionTokenInvalid(raw []byte) bool {
+	text := strings.ToLower(string(raw))
+	return strings.Contains(text, "action_token_invalid") || strings.Contains(text, "action_token_required")
 }
 
 func mapHDHiveResource(row map[string]any, index int) hdhiveResource {
