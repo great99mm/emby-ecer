@@ -673,6 +673,24 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	return next, os.WriteFile(s.path, raw, 0o600)
 }
 
+func (s *settingsStore) UpdateHDHiveCookie(cookie string) error {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cookie == strings.TrimSpace(s.data.HDHiveCookie) {
+		return nil
+	}
+	s.data.HDHiveCookie = cookie
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	raw, _ := json.MarshalIndent(s.data, "", "  ")
+	return os.WriteFile(s.path, raw, 0o600)
+}
+
 func maskSettings(s settings) map[string]any {
 	return map[string]any{
 		"embyUrl":         s.EmbyURL,

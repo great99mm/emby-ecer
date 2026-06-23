@@ -260,6 +260,7 @@ func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := newHDHiveClient(store.Get())
+	defer syncHDHiveCookie(client)
 	unlocked, err := client.Unlock(body.Slug)
 	if err != nil {
 		writeError(w, statusFromError(err), err)
@@ -353,6 +354,7 @@ func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) (
 		return nil, err
 	}
 	client := newHDHiveClient(s)
+	defer syncHDHiveCookie(client)
 	resources, err := client.Search(keyword, mediaType, tmdbID)
 	if err != nil {
 		return nil, err
@@ -621,6 +623,18 @@ func (c *hdhiveClient) cookieHeader() string {
 		}
 	}
 	return serializeCookieHeader(pairs)
+}
+
+func syncHDHiveCookie(client *hdhiveClient) {
+	if client == nil || store == nil {
+		return
+	}
+	if cookie := client.cookieHeader(); cookie != "" {
+		if err := store.UpdateHDHiveCookie(cookie); err != nil {
+			log.Printf("HDHive cookie update failed: %v", err)
+		}
+		client.cookie = cookie
+	}
 }
 
 func parseCookieHeader(header string) map[string]string {
