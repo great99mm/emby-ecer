@@ -388,12 +388,19 @@ func (c *hdhiveClient) Search(keyword, mediaType string, tmdbID int) ([]hdhiveRe
 func (c *hdhiveClient) searchByTMDB(tmdbID int, mediaType string) ([]hdhiveResource, error) {
 	slug := strconv.Itoa(tmdbID)
 	if raw, err := c.fetchText(fmt.Sprintf("/tmdb/%s/%d", mediaType, tmdbID)); err == nil {
+		if resources := hdhiveResourcesFromHTML(raw); len(resources) > 0 {
+			return resources, nil
+		}
 		pattern := regexp.MustCompile(fmt.Sprintf(`NEXT_REDIRECT;replace;/%s/([^;]+);307`, regexp.QuoteMeta(mediaType)))
 		if match := pattern.FindStringSubmatch(raw); len(match) > 1 {
 			slug = strings.TrimSpace(match[1])
 		}
 	}
-	return c.resourcesFromDetail(fmt.Sprintf("/%s/%s", mediaType, url.PathEscape(slug)))
+	resources, err := c.resourcesFromDetail(fmt.Sprintf("/%s/%s", mediaType, url.PathEscape(slug)))
+	if (err != nil || len(resources) == 0) && slug != strconv.Itoa(tmdbID) {
+		return c.resourcesFromDetail(fmt.Sprintf("/%s/%d", mediaType, tmdbID))
+	}
+	return resources, err
 }
 
 func (c *hdhiveClient) searchByKeyword(keyword, mediaType string) ([]hdhiveResource, error) {
@@ -433,16 +440,24 @@ func (c *hdhiveClient) resourcesFromDetail(path string) ([]hdhiveResource, error
 	if err != nil {
 		return nil, err
 	}
+	return hdhiveResourcesFromHTML(raw), nil
+}
+
+func hdhiveResourcesFromHTML(raw string) []hdhiveResource {
 	rows := extractHDHiveArray(raw, "115")
 	resources := make([]hdhiveResource, 0, len(rows))
 	for index, row := range rows {
-		if normalizeHDHivePanType(row["pan_type"]) != "115" {
+		panType := normalizeHDHivePanType(row["pan_type"])
+		if panType == "" {
+			panType = "115"
+		}
+		if panType != "115" {
 			continue
 		}
 		resource := mapHDHiveResource(row, index)
 		resources = append(resources, resource)
 	}
-	return resources, nil
+	return resources
 }
 
 func (c *hdhiveClient) Unlock(slug string) (hdhiveResource, error) {
@@ -988,7 +1003,14 @@ func normalizeHDHiveMediaType(value string) string {
 }
 
 func normalizeHDHivePanType(value any) string {
-	normalized := regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(anyToString(value)), "")
+	if value == nil {
+		return "115"
+	}
+	text := strings.TrimSpace(anyToString(value))
+	if text == "" || strings.EqualFold(text, "null") || strings.EqualFold(text, "nil") || text == "<nil>" {
+		return "115"
+	}
+	normalized := regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(text), "")
 	if normalized == "115" || normalized == "115com" || normalized == "115wangpan" || normalized == "115netdisk" || normalized == "" {
 		return "115"
 	}

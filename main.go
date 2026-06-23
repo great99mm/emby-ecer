@@ -3177,6 +3177,8 @@ func extractPassword(text string) string {
 
 func anyToString(value any) string {
 	switch v := value.(type) {
+	case nil:
+		return ""
 	case string:
 		return v
 	case float64:
