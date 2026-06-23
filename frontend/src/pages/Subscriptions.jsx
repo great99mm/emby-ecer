@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { CheckCircle2, ExternalLink, Play, Plus, Search, Trash2, RefreshCw } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Play, Plus, Search, Trash2, RefreshCw, Unlock } from 'lucide-react';
 
 const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled: true, autoTransfer: false, targetCid: '0' };
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
@@ -75,6 +75,9 @@ export default function Subscriptions() {
           title: selectedTMDB.title,
           mediaType: selectedTMDB.mediaType,
           tmdbId: Number(selectedTMDB.tmdbId || 0),
+          tmdbYear: selectedTMDB.year || '',
+          posterPath: selectedTMDB.posterPath || '',
+          overview: selectedTMDB.overview || '',
           season: Number(form.season || 0),
         }),
       });
@@ -198,32 +201,95 @@ export default function Subscriptions() {
         )}
       </div>
 
-      <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {items.length === 0 ? <div className="card text-center text-sm text-gray-500">暂无订阅</div> : items.map(item => (
-          <div key={item.id} className="card">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h2 className="truncate text-base font-bold text-gray-900">{item.title}</h2>
-                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-bold text-gray-500">{item.mediaType === 'movie' ? '电影' : '剧集'}</span>
-                  {!item.enabled && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-600">停用</span>}
-                </div>
-                <p className="mt-1 text-xs text-gray-400">TMDB {item.tmdbId || '未填'} · 上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}</p>
-                {item.lastMessage && <p className="mt-1 text-xs text-gray-500">{item.lastMessage}</p>}
-              </div>
-              <div className="shrink-0 flex items-center gap-1">
-                <button onClick={() => run(item.id)} disabled={running} className="rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-semibold text-gray-600 hover:text-primary-600 disabled:opacity-40">扫描</button>
-                <button onClick={() => remove(item.id)} className="rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /></button>
-              </div>
-            </div>
-            {!!item.lastResults?.length && <div className="mt-3 space-y-2 border-t border-gray-100 pt-3">
-              {item.lastResults.slice(0, 3).map((r, i) => <div key={i} className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600"><b>{r.title}</b><div className="mt-0.5 text-gray-400">{r.source}</div></div>)}
-            </div>}
-          </div>
+          <SubscriptionCard key={item.id} item={item} running={running} onRun={run} onRemove={remove} onReload={load} />
         ))}
       </div>
 
       {result && <div className="card text-sm text-gray-600">本次扫描：成功 {result.success || 0}，失败 {result.failed || 0}</div>}
+    </div>
+  );
+}
+
+function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
+  const [unlockingSlug, setUnlockingSlug] = useState('');
+  const results = item.lastResults || [];
+  const locked = results.filter(r => r.source === 'HDHive' && r.hdhiveLocked);
+  const points = locked.reduce((sum, r) => sum + (Number(r.unlockPoints) || 0), 0);
+  const hdhiveCount = results.filter(r => r.source === 'HDHive').length;
+  const pansouCount = results.filter(r => r.source !== 'HDHive').length;
+
+  const approveUnlock = async (resource) => {
+    if (!window.confirm(`确认消耗 ${resource.unlockPoints || 0} 积分解锁这个 HDHive 资源？`)) return;
+    setUnlockingSlug(resource.hdhiveSlug);
+    try {
+      await api('/api/hdhive/unlock', {
+        method: 'POST',
+        body: JSON.stringify({ slug: resource.hdhiveSlug, title: resource.title, subscriptionId: item.id }),
+      });
+      toast.success('解锁成功，已写回订阅结果');
+      await onReload?.();
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setUnlockingSlug('');
+    }
+  };
+
+  return (
+    <div className="card overflow-hidden p-0">
+      <div className="relative aspect-[2/3] bg-gray-100">
+        {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent" />
+        {points > 0 && <div className="absolute right-2 top-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-black text-amber-700 shadow-sm">{points}积分</div>}
+        {!item.enabled && <div className="absolute left-2 top-2 rounded-full border border-white/60 bg-white/90 px-2 py-1 text-[11px] font-bold text-gray-500">停用</div>}
+        <div className="absolute bottom-0 left-0 right-0 p-3 text-white">
+          <div className="flex items-center gap-1.5">
+            <h2 className="min-w-0 flex-1 truncate text-base font-black">{item.title}</h2>
+            <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-bold backdrop-blur">{item.mediaType === 'movie' ? '电影' : '剧集'}</span>
+          </div>
+          <p className="mt-1 text-[11px] font-semibold text-white/70">{item.tmdbYear || '未知年份'} · TMDB {item.tmdbId || '未填'}{item.season ? ` · S${String(item.season).padStart(2, '0')}` : ''}</p>
+        </div>
+      </div>
+      <div className="space-y-3 p-3">
+        <p className="line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-gray-500">{item.overview || '暂无简介。订阅计划任务会定时从 PanSou 和 HDHive 搜索候选资源。'}</p>
+        <div className="grid grid-cols-3 gap-1 text-center text-[11px] font-bold">
+          <div className="rounded-md bg-gray-50 px-2 py-1 text-gray-500">PanSou {pansouCount}</div>
+          <div className="rounded-md bg-gray-50 px-2 py-1 text-gray-500">HDHive {hdhiveCount}</div>
+          <div className={`rounded-md px-2 py-1 ${locked.length ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-600'}`}>{locked.length ? `待审 ${locked.length}` : '无待审'}</div>
+        </div>
+        <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}</p>
+        {item.lastMessage && <p className="line-clamp-2 text-xs text-gray-500">{item.lastMessage}</p>}
+        {!!locked.length && (
+          <details className="rounded-lg border border-amber-100 bg-amber-50/50 p-2">
+            <summary className="cursor-pointer text-xs font-bold text-amber-700">待审批解锁资源</summary>
+            <div className="mt-2 space-y-1.5">
+              {locked.slice(0, 4).map((r, i) => (
+                <div key={i} className="rounded bg-white px-2 py-1 text-xs text-gray-600">
+                  <div><b>{r.unlockPoints || 0}积分</b> · {r.title}</div>
+                  <button type="button" onClick={() => approveUnlock(r)} disabled={unlockingSlug === r.hdhiveSlug || running} className="mt-1 inline-flex items-center gap-1 rounded border border-amber-200 px-2 py-1 text-[11px] font-bold text-amber-700 hover:bg-amber-50 disabled:opacity-50">
+                    <Unlock className="h-3 w-3" /> {unlockingSlug === r.hdhiveSlug ? '解锁中' : '审批解锁'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+        {!!results.length && (
+          <details className="rounded-lg border border-gray-100 bg-gray-50 p-2">
+            <summary className="cursor-pointer text-xs font-bold text-gray-500">最近候选 {results.length} 条</summary>
+            <div className="mt-2 space-y-1.5">
+              {results.slice(0, 5).map((r, i) => <div key={i} className="rounded bg-white px-2 py-1 text-xs text-gray-600"><b>{r.source}</b> · {r.title}</div>)}
+            </div>
+          </details>
+        )}
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <button onClick={() => onRun(item.id)} disabled={running} className="rounded-md border border-gray-300 px-2.5 py-2 text-xs font-semibold text-gray-600 hover:text-primary-600 disabled:opacity-40">扫描</button>
+          <button onClick={() => onRemove(item.id)} className="rounded-md border border-red-200 px-2.5 py-2 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /></button>
+        </div>
+        {item.autoTransfer && <p className="text-[11px] font-semibold text-primary-600">命中可转存链接后自动转存</p>}
+      </div>
     </div>
   );
 }

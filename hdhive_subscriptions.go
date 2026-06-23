@@ -35,6 +35,9 @@ type subscription struct {
 	Title        string             `json:"title"`
 	MediaType    string             `json:"mediaType"`
 	TMDBID       int                `json:"tmdbId"`
+	TMDBYear     string             `json:"tmdbYear,omitempty"`
+	PosterPath   string             `json:"posterPath,omitempty"`
+	Overview     string             `json:"overview,omitempty"`
 	Season       int                `json:"season"`
 	Enabled      bool               `json:"enabled"`
 	AutoTransfer bool               `json:"autoTransfer"`
@@ -124,6 +127,9 @@ func (s *subscriptionStore) Save(item subscription) (subscription, error) {
 		return item, badRequest("订阅标题不能为空")
 	}
 	item.MediaType = normalizeHDHiveMediaType(item.MediaType)
+	item.TMDBYear = strings.TrimSpace(item.TMDBYear)
+	item.PosterPath = strings.TrimSpace(item.PosterPath)
+	item.Overview = strings.TrimSpace(item.Overview)
 	if item.ID == "" {
 		item.ID = randomID(8)
 	}
@@ -164,6 +170,42 @@ func (s *subscriptionStore) UpdateResult(id string, results []normalizedResult, 
 		_ = s.persistLocked()
 	}
 	s.mu.Unlock()
+}
+
+func (s *subscriptionStore) ReplaceUnlockedResult(id, slug string, result normalizedResult) (subscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[strings.TrimSpace(id)]
+	if !ok {
+		return subscription{}, badRequest("订阅不存在")
+	}
+	slug = strings.TrimSpace(slug)
+	updated := false
+	for index := range item.LastResults {
+		current := item.LastResults[index]
+		if strings.TrimSpace(current.HDHiveSlug) != slug {
+			continue
+		}
+		result.Title = firstNonEmpty(cleanHDHiveLockedTitle(result.Title), cleanHDHiveLockedTitle(current.Title))
+		result.Source = "HDHive"
+		result.Query = firstNonEmpty(result.Query, current.Query)
+		result.Datetime = firstNonEmpty(result.Datetime, current.Datetime)
+		result.HDHiveSlug = slug
+		result.HDHiveLocked = false
+		result.UnlockPoints = current.UnlockPoints
+		item.LastResults[index] = result
+		updated = true
+		break
+	}
+	if !updated {
+		return subscription{}, badRequest("未找到待解锁资源")
+	}
+	item.LastRunAt = time.Now().Format(time.RFC3339)
+	item.UpdatedAt = item.LastRunAt
+	item.LastStatus = "success"
+	item.LastMessage = formatSubscriptionRunMessage(item.LastResults)
+	s.items[item.ID] = item
+	return item, s.persistLocked()
 }
 
 func (s *subscriptionStore) persistLocked() error {
@@ -279,8 +321,9 @@ func handleHDHiveLogin(w http.ResponseWriter, r *http.Request) {
 
 func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Slug  string `json:"slug"`
-		Title string `json:"title"`
+		Slug           string `json:"slug"`
+		Title          string `json:"title"`
+		SubscriptionID string `json:"subscriptionId"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -307,14 +350,23 @@ func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := normalizedResult{
-		Title:        firstNonEmpty(body.Title, unlocked.ResourceName, unlocked.Title, "HDHive 资源"),
+		Title:        firstNonEmpty(cleanHDHiveLockedTitle(body.Title), unlocked.ResourceName, unlocked.Title, "HDHive 资源"),
 		URL:          unlocked.URL,
 		Password:     firstNonEmpty(unlocked.Password, extractPassword(unlocked.URL)),
 		Source:       "HDHive",
 		HDHiveSlug:   strings.TrimSpace(body.Slug),
 		HDHiveLocked: false,
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"result": result})
+	response := map[string]any{"result": result}
+	if strings.TrimSpace(body.SubscriptionID) != "" {
+		updated, updateErr := subStore.ReplaceUnlockedResult(body.SubscriptionID, body.Slug, result)
+		if updateErr != nil {
+			writeError(w, statusFromError(updateErr), updateErr)
+			return
+		}
+		response["subscription"] = updated
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func runSubscriptions(s settings, ids []string) (subscriptionRunResult, error) {
@@ -336,7 +388,7 @@ func runSubscriptions(s settings, ids []string) (subscriptionRunResult, error) {
 			continue
 		}
 		runItem.Results = resources
-		message := fmt.Sprintf("找到 %d 条候选资源", len(resources))
+		message := formatSubscriptionRunMessage(resources)
 		if shouldAutoTransferSubscription(s, item) && len(resources) > 0 {
 			for _, candidate := range resources {
 				if strings.TrimSpace(candidate.URL) == "" {
@@ -369,20 +421,55 @@ func runSubscriptions(s settings, ids []string) (subscriptionRunResult, error) {
 
 func searchSubscriptionResources(s settings, item subscription) ([]normalizedResult, error) {
 	mediaType := normalizeHDHiveMediaType(item.MediaType)
-	results, err := searchHDHiveNormalized(s, item.Title, mediaType, item.TMDBID)
-	if err != nil || len(results) == 0 {
-		fallbackResults, fallbackErr := searchKeyword(s, item.Title)
-		if fallbackErr == nil {
-			if values, ok := fallbackResults["results"].([]normalizedResult); ok {
-				results = values
-				err = nil
+	results := make([]normalizedResult, 0)
+	errorsText := make([]string, 0)
+	if pansouResults, err := searchKeyword(s, item.Title); err == nil {
+		if values, ok := pansouResults["results"].([]normalizedResult); ok {
+			results = append(results, values...)
+		}
+	} else {
+		errorsText = append(errorsText, "PanSou: "+err.Error())
+	}
+	if hdhiveResults, err := searchHDHiveNormalized(s, item.Title, mediaType, item.TMDBID); err == nil {
+		results = append(results, hdhiveResults...)
+	} else {
+		errorsText = append(errorsText, "HDHive: "+err.Error())
+	}
+	if len(results) == 0 && len(errorsText) > 0 {
+		return nil, errors.New(strings.Join(errorsText, "；"))
+	}
+	results = dedupeNormalizedResults(results, 40)
+	return rankWithOpenAI(s, item, results), nil
+}
+
+func formatSubscriptionRunMessage(resources []normalizedResult) string {
+	pansouCount := 0
+	hdhiveCount := 0
+	lockedCount := 0
+	unlockPoints := 0
+	for _, item := range resources {
+		if strings.EqualFold(item.Source, "HDHive") {
+			hdhiveCount++
+			if item.HDHiveLocked {
+				lockedCount++
+				unlockPoints += item.UnlockPoints
 			}
+		} else {
+			pansouCount++
 		}
 	}
-	if err != nil {
-		return nil, err
+	parts := []string{fmt.Sprintf("找到 %d 条候选资源", len(resources)), fmt.Sprintf("PanSou %d", pansouCount), fmt.Sprintf("HDHive %d", hdhiveCount)}
+	if lockedCount > 0 {
+		parts = append(parts, fmt.Sprintf("待审批解锁 %d 条 / %d 积分", lockedCount, unlockPoints))
 	}
-	return rankWithOpenAI(s, item, results), nil
+	return strings.Join(parts, "，")
+}
+
+func cleanHDHiveLockedTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.ReplaceAll(title, "｜需解锁", "")
+	title = strings.ReplaceAll(title, "｜未获取到115链接", "")
+	return strings.TrimSpace(title)
 }
 
 func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) ([]normalizedResult, error) {
