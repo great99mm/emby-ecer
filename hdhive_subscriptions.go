@@ -495,11 +495,25 @@ func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) (
 	if err != nil {
 		return nil, err
 	}
-	defer syncHDHiveCookie(client)
+	activeClient := client
 	resources, err := client.Search(keyword, mediaType, tmdbID)
 	if err != nil {
-		return nil, err
+		if isHDHiveTokenError(err) && hasHDHiveCredentials(s) {
+			syncHDHiveCookie(client)
+			refreshedClient, refreshErr := refreshHDHiveLogin(s)
+			if refreshErr != nil {
+				return nil, fmt.Errorf("HDHive token 失效，自动登录失败：%w", refreshErr)
+			}
+			resources, err = refreshedClient.Search(keyword, mediaType, tmdbID)
+			activeClient = refreshedClient
+			syncHDHiveCookie(refreshedClient)
+		}
+		if err != nil {
+			syncHDHiveCookie(activeClient)
+			return nil, err
+		}
 	}
+	syncHDHiveCookie(activeClient)
 	results := make([]normalizedResult, 0, len(resources))
 	for _, item := range resources {
 		if item.URL != "" && !is115Link(item.URL) {
