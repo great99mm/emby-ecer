@@ -80,6 +80,7 @@ export default function SearchResults({ search }) {
         const matched = info.matched;
         const key = `${search.query || 's'}:${index}`;
         const t = transfers[key];
+        const hasUrl = !!result.url;
 
         return (
           <div key={index} className={`rounded-md bg-gray-50 p-3 border ${matched ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-100'}`}>
@@ -96,6 +97,8 @@ export default function SearchResults({ search }) {
                 <span className="shrink-0 text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">已转存</span>
               ) : t?.error ? (
                 <span className="shrink-0 text-xs text-red-500">{t.error}</span>
+              ) : !hasUrl ? (
+                <span className="shrink-0 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-1 rounded">待解锁</span>
               ) : (
                 <button
                   onClick={() => doTransfer(result, index)}

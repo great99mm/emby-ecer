@@ -331,11 +331,15 @@ func searchHDHiveNormalized(s settings, keyword, mediaType string, tmdbID int) (
 				item.Password = firstNonEmpty(item.Password, unlocked.Password)
 			}
 		}
-		if !is115Link(item.URL) {
+		if item.URL != "" && !is115Link(item.URL) {
 			continue
 		}
+		title := firstNonEmpty(item.ResourceName, item.Title, "HDHive 资源") + formatHDHiveMeta(item)
+		if item.URL == "" {
+			title += "｜未获取到115链接"
+		}
 		results = append(results, normalizedResult{
-			Title:    firstNonEmpty(item.ResourceName, item.Title, "HDHive 资源") + formatHDHiveMeta(item),
+			Title:    title,
 			URL:      item.URL,
 			Password: firstNonEmpty(item.Password, extractPassword(item.URL)),
 			Source:   "HDHive",
@@ -692,6 +696,7 @@ func searchHDHiveMediaCandidates(raw, keyword, mediaType string) []map[string]an
 	keywordNorm := normalizeHDHiveKeyword(keyword)
 	type scoredCandidate struct {
 		score int
+		hit   bool
 		row   map[string]any
 	}
 	scored := make([]scoredCandidate, 0)
@@ -700,20 +705,37 @@ func searchHDHiveMediaCandidates(raw, keyword, mediaType string) []map[string]an
 		if slug == "" {
 			continue
 		}
-		title := firstNonEmpty(anyToString(row["title"]), anyToString(row["original_title"]), anyToString(row["name"]))
+		title := firstNonEmpty(anyToString(row["title"]), anyToString(row["name"]), anyToString(row["original_title"]), anyToString(row["original_name"]))
 		normalizedTitle := normalizeHDHiveKeyword(title)
-		if keywordNorm == "" || normalizedTitle == "" || !strings.Contains(normalizedTitle, keywordNorm) && !strings.Contains(keywordNorm, normalizedTitle) {
+		if normalizedTitle == "" {
 			continue
 		}
-		score := 100
+		hit := keywordNorm != "" && (strings.Contains(normalizedTitle, keywordNorm) || strings.Contains(keywordNorm, normalizedTitle))
+		score := 0
+		if hit {
+			score += 120
+		}
 		if strings.EqualFold(anyToString(row["type"]), mediaType) {
 			score += 20
 		}
-		scored = append(scored, scoredCandidate{score: score, row: row})
+		if title != "" {
+			score += 5
+		}
+		scored = append(scored, scoredCandidate{score: score, hit: hit, row: row})
 	}
 	sort.Slice(scored, func(left, right int) bool { return scored[left].score > scored[right].score })
 	out := make([]map[string]any, 0)
+	preferHits := false
 	for _, item := range scored {
+		if item.hit {
+			preferHits = true
+			break
+		}
+	}
+	for _, item := range scored {
+		if preferHits && !item.hit {
+			continue
+		}
 		out = append(out, item.row)
 		if len(out) >= 3 {
 			break
