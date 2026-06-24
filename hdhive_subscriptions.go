@@ -99,10 +99,17 @@ func newSubscriptionStore(path string) *subscriptionStore {
 		var items []subscription
 		if err := json.Unmarshal(raw, &items); err == nil {
 			for _, item := range items {
-				if strings.TrimSpace(item.ID) != "" {
+				item = normalizeSubscription(item)
+				if strings.TrimSpace(item.ID) == "" {
+					continue
+				}
+				if existingID, ok := store.findDuplicateIDLocked(item); ok {
+					store.items[existingID] = mergeSubscription(store.items[existingID], item)
+				} else {
 					store.items[item.ID] = item
 				}
 			}
+			_ = store.persistLocked()
 		}
 	}
 	return store
@@ -122,30 +129,103 @@ func (s *subscriptionStore) List() []subscription {
 }
 
 func (s *subscriptionStore) Save(item subscription) (subscription, error) {
-	item.Title = strings.TrimSpace(item.Title)
+	item = normalizeSubscription(item)
 	if item.Title == "" {
 		return item, badRequest("订阅标题不能为空")
 	}
-	item.MediaType = normalizeHDHiveMediaType(item.MediaType)
-	item.TMDBYear = strings.TrimSpace(item.TMDBYear)
-	item.PosterPath = strings.TrimSpace(item.PosterPath)
-	item.Overview = strings.TrimSpace(item.Overview)
+	now := time.Now().Format(time.RFC3339)
 	if item.ID == "" {
 		item.ID = randomID(8)
 	}
-	now := time.Now().Format(time.RFC3339)
 	if item.CreatedAt == "" {
 		item.CreatedAt = now
 	}
 	item.UpdatedAt = now
-	if item.TargetCID == "" {
-		item.TargetCID = "0"
-	}
 	s.mu.Lock()
+	if existingID, ok := s.findDuplicateIDLocked(item); ok {
+		existing := s.items[existingID]
+		item.ID = existing.ID
+		item.CreatedAt = existing.CreatedAt
+		item.LastRunAt = existing.LastRunAt
+		item.LastStatus = existing.LastStatus
+		item.LastMessage = existing.LastMessage
+		item.LastResults = existing.LastResults
+		merged := mergeSubscription(existing, item)
+		s.items[existingID] = merged
+		err := s.persistLocked()
+		s.mu.Unlock()
+		return merged, err
+	}
 	s.items[item.ID] = item
 	err := s.persistLocked()
 	s.mu.Unlock()
 	return item, err
+}
+
+func normalizeSubscription(item subscription) subscription {
+	item.Title = strings.TrimSpace(item.Title)
+	item.MediaType = normalizeHDHiveMediaType(item.MediaType)
+	item.TMDBYear = strings.TrimSpace(item.TMDBYear)
+	item.PosterPath = strings.TrimSpace(item.PosterPath)
+	item.Overview = strings.TrimSpace(item.Overview)
+	item.TargetCID = strings.TrimSpace(item.TargetCID)
+	if item.MediaType == "movie" {
+		item.Season = 0
+	}
+	if item.TargetCID == "" {
+		item.TargetCID = "0"
+	}
+	return item
+}
+
+func (s *subscriptionStore) findDuplicateIDLocked(item subscription) (string, bool) {
+	key := subscriptionDedupKey(item)
+	if key == "" {
+		return "", false
+	}
+	for id, current := range s.items {
+		if strings.TrimSpace(item.ID) != "" && id == item.ID {
+			continue
+		}
+		if subscriptionDedupKey(current) == key {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+func subscriptionDedupKey(item subscription) string {
+	mediaType := normalizeHDHiveMediaType(item.MediaType)
+	if item.TMDBID > 0 {
+		season := item.Season
+		if mediaType == "movie" {
+			season = 0
+		}
+		return fmt.Sprintf("%s:%d:%d", mediaType, item.TMDBID, season)
+	}
+	title := strings.ToLower(strings.TrimSpace(item.Title))
+	if title == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s:%d", mediaType, title, item.Season)
+}
+
+func mergeSubscription(existing, incoming subscription) subscription {
+	merged := existing
+	merged.Title = firstNonEmpty(incoming.Title, existing.Title)
+	merged.MediaType = firstNonEmpty(incoming.MediaType, existing.MediaType)
+	if incoming.TMDBID > 0 {
+		merged.TMDBID = incoming.TMDBID
+	}
+	merged.TMDBYear = firstNonEmpty(incoming.TMDBYear, existing.TMDBYear)
+	merged.PosterPath = firstNonEmpty(incoming.PosterPath, existing.PosterPath)
+	merged.Overview = firstNonEmpty(incoming.Overview, existing.Overview)
+	merged.Season = incoming.Season
+	merged.Enabled = incoming.Enabled || existing.Enabled
+	merged.AutoTransfer = incoming.AutoTransfer || existing.AutoTransfer
+	merged.TargetCID = firstNonEmpty(incoming.TargetCID, existing.TargetCID, "0")
+	merged.UpdatedAt = firstNonEmpty(incoming.UpdatedAt, existing.UpdatedAt)
+	return normalizeSubscription(merged)
 }
 
 func (s *subscriptionStore) Delete(ids []string) error {
