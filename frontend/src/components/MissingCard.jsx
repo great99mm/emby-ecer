@@ -211,23 +211,31 @@ export default function MissingCard({ group, selectable = false, selected = fals
                 <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
               </div>
             </div>
-            <div className="grid grid-cols-3 border-b border-gray-100 text-sm font-bold">
-              <button type="button" onClick={() => setActiveSource('mp')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'mp' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
-                <Download className="w-4 h-4" /> MP{allMP.length ? ` · ${allMP.length}` : ''}
-              </button>
-              <button type="button" onClick={() => setActiveSource('hdhive')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'hdhive' ? 'bg-amber-50 text-amber-700' : 'text-gray-500 hover:bg-gray-50'}`}>
-                <Sparkles className="w-4 h-4" /> HDHive · {panResults.filter(r => r.source === 'HDHive').length}
-              </button>
-              <button type="button" onClick={() => setActiveSource('pan')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'pan' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
-                <Search className="w-4 h-4" /> 盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}
-              </button>
+            <div className="px-4 py-3 border-b border-gray-100">
+              {activeSource === 'mp' && (
+                <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
+                  <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}
+                </button>
+              )}
+              {activeSource === 'hdhive' && (
+                <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
+                  <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}
+                </button>
+              )}
+              {activeSource === 'pan' && (
+                <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50">
+                  <Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}
+                </button>
+              )}
+              <div className="mt-2 grid grid-cols-3 overflow-hidden rounded-md border border-gray-200 bg-gray-50 text-[11px] font-bold">
+                <button type="button" onClick={() => setActiveSource('mp')} className={`px-2 py-1.5 ${activeSource === 'mp' ? 'bg-white text-primary-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>MP{allMP.length ? ` · ${allMP.length}` : ''}</button>
+                <button type="button" onClick={() => setActiveSource('hdhive')} className={`border-x border-gray-200 px-2 py-1.5 ${activeSource === 'hdhive' ? 'bg-white text-amber-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>HDHive · {panResults.filter(r => r.source === 'HDHive').length}</button>
+                <button type="button" onClick={() => setActiveSource('pan')} className={`px-2 py-1.5 ${activeSource === 'pan' ? 'bg-white text-primary-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}</button>
+              </div>
             </div>
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
               {activeSource === 'mp' && (
                 <>
-                  <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
-                    <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}
-                  </button>
                   {search?.mpKeywords && (
                     <div className="flex flex-wrap gap-1 mb-2">
                       {search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}
@@ -302,11 +310,6 @@ export default function MissingCard({ group, selectable = false, selected = fals
 
               {activeSource !== 'mp' && (
                 <>
-                  {activeSource === 'hdhive' ? (
-                    <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50"><Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}</button>
-                  ) : (
-                    <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary mb-3 flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50"><Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}</button>
-                  )}
                   {activeSource === 'hdhive' && search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
                   {activeSource === 'pan' && search?.loading && <p className="text-sm text-gray-400 py-2">盘搜中...</p>}
                   {search?.error && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.error}</p></div>}
