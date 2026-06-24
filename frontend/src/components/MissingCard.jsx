@@ -181,7 +181,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
       {open && (
         <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 px-4 pb-8 overflow-y-auto" onClick={() => setOpen(false)}>
           <div className="fixed inset-0 bg-black/40" />
-          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-lg my-auto" onClick={e => e.stopPropagation()}>
+          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-5xl my-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-start gap-3 p-4 border-b border-gray-100">
               {group.posterPath ? (
                 <img src={TMDB_IMG + group.posterPath} className="w-14 h-[83px] rounded object-cover shrink-0 bg-gray-100" alt="" />
@@ -241,11 +241,12 @@ export default function MissingCard({ group, selectable = false, selected = fals
               {matchedMP.length > 0 && (
                 <div className="mb-3">
                   <p className="text-xs font-bold text-gray-400 mb-1.5">MP匹配 · {matchedAll}条</p>
+                  <div className="grid gap-2 lg:grid-cols-3">
                   {matchedMP.map((r, i) => {
                     const mt = matchType(r);
                     return (
-                    <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30 mb-1.5">
-                      <div className="flex items-start justify-between gap-2">
+                    <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30">
+                      <div className="flex h-full flex-col gap-2">
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium text-gray-800">
                             <span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1 ${mt === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{mt === 'include' ? '包含' : '✓'}</span>
@@ -254,21 +255,22 @@ export default function MissingCard({ group, selectable = false, selected = fals
                           {r.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{r.description}</p>}
                           <p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}{r.seeders ? ` · ${r.seeders}↑` : ''}</p>
                         </div>
-                        <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
+                        <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
                       </div>
                     </div>
                   )})}
+                  </div>
                 </div>
               )}
 
               {unmatchedMP.length > 0 && (
                 (matchedMP.length === 0) ? (
-                  <div className="mt-1 space-y-1.5">
+                  <div className="mt-1 grid gap-2 lg:grid-cols-3">
                     {unmatchedMP.map((r, i) => (
                       <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                        <div className="flex items-start justify-between gap-2">
+                        <div className="flex h-full flex-col gap-2">
                           <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
-                          <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
+                          <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs text-primary-600">下载</button>
                         </div>
                       </div>
                     ))}
@@ -276,12 +278,12 @@ export default function MissingCard({ group, selectable = false, selected = fals
                 ) : (
                   <details>
                     <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">MP未匹配 · {unmatchedMP.length}条</summary>
-                    <div className="mt-1 space-y-1.5">
+                    <div className="mt-1 grid gap-2 lg:grid-cols-3">
                       {unmatchedMP.map((r, i) => (
                         <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                          <div className="flex items-start justify-between gap-2">
+                          <div className="flex h-full flex-col gap-2">
                             <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
-                            <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
+                            <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs text-primary-600">下载</button>
                           </div>
                         </div>
                       ))}

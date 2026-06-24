@@ -95,6 +95,7 @@ export default function SearchResults({ search, targetCid = '', subscriptionId =
   return (
     <div className="mt-3 space-y-2">
       <p className="text-xs font-bold text-gray-400">搜索结果 · {search.results.length} 条</p>
+      <div className="grid gap-2 lg:grid-cols-3">
       {search.results.map((result, index) => {
         const key = `${search.query || 's'}:${index}`;
         result = unlockedResults[key] || result;
@@ -107,7 +108,7 @@ export default function SearchResults({ search, targetCid = '', subscriptionId =
 
         return (
           <div key={index} className={`rounded-md bg-gray-50 p-3 border ${matched ? 'border-emerald-300 bg-emerald-50/30' : 'border-gray-100'}`}>
-            <div className="flex items-start justify-between gap-2">
+            <div className="flex h-full flex-col gap-2">
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-bold text-gray-900 leading-snug">
                   {matched && <span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1.5 ${info.type === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{info.type === 'include' ? '包含' : '✓'}</span>}
@@ -117,25 +118,25 @@ export default function SearchResults({ search, targetCid = '', subscriptionId =
                 <p className="mt-1 text-xs text-gray-400">{result.source || 'PanSou'}</p>
               </div>
               {t?.ok ? (
-                <span className="shrink-0 text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">已转存</span>
+                <span className="self-start text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded">已转存</span>
               ) : t?.error ? (
-                <span className="shrink-0 text-xs text-red-500">{t.error}</span>
+                <span className="text-xs text-red-500">{t.error}</span>
               ) : canUnlock ? (
                 <button
                   onClick={() => doHDHiveUnlock(result, index)}
                   disabled={t?.loading}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-100 transition-colors disabled:opacity-50"
+                  className="inline-flex items-center justify-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-100 transition-colors disabled:opacity-50"
                 >
                   <Unlock className="w-3.5 h-3.5" />
                   {t?.loading ? '解锁中' : `解锁${result.unlockPoints ? ` ${result.unlockPoints}积分` : ''}`}
                 </button>
               ) : !hasUrl ? (
-                <span className="shrink-0 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-1 rounded">无链接</span>
+                <span className="self-start text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-1 rounded">无链接</span>
               ) : (
                 <button
                   onClick={() => doTransfer(result, index)}
                   disabled={t?.loading}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 transition-colors disabled:opacity-50"
+                  className="inline-flex items-center justify-center gap-1 rounded-md border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 transition-colors disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   {t?.loading ? '转存中' : '转存'}
@@ -145,6 +146,7 @@ export default function SearchResults({ search, targetCid = '', subscriptionId =
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

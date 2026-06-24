@@ -10,6 +10,7 @@ const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled:
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
 
 export default function Subscriptions() {
+  const missing = useStore(s => s.missing);
   const [items, setItems] = useState([]);
   const [running, setRunning] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -24,6 +25,7 @@ export default function Subscriptions() {
   const enabledCount = items.filter(item => item.enabled).length;
   const lockedCount = items.reduce((sum, item) => sum + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0);
   const resultCount = items.reduce((sum, item) => sum + (item.lastResults || []).length, 0);
+  const missingBySubscription = buildSubscriptionMissingMap(missing);
 
   const load = async () => {
     try {
@@ -226,7 +228,7 @@ export default function Subscriptions() {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
         {items.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : items.map(item => (
-          <SubscriptionCard key={item.id} item={item} running={running} onRun={run} onRemove={remove} onReload={load} />
+          <SubscriptionCard key={item.id} item={item} missingCount={subscriptionMissingCount(item, missingBySubscription)} running={running} onRun={run} onRemove={remove} onReload={load} />
         ))}
       </div>
 
@@ -235,7 +237,25 @@ export default function Subscriptions() {
   );
 }
 
-function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
+function buildSubscriptionMissingMap(missing) {
+  const out = {};
+  for (const episode of missing || []) {
+    const tmdbId = Number(episode.tmdbId || 0);
+    if (!tmdbId) continue;
+    const season = Number(episode.season || 0);
+    out[`${tmdbId}:0`] = (out[`${tmdbId}:0`] || 0) + 1;
+    if (season > 0) out[`${tmdbId}:${season}`] = (out[`${tmdbId}:${season}`] || 0) + 1;
+  }
+  return out;
+}
+
+function subscriptionMissingCount(item, missingMap) {
+  if (!item || item.mediaType === 'movie' || !item.tmdbId) return 0;
+  const season = Number(item.season || 0);
+  return missingMap[`${Number(item.tmdbId)}:${season}`] || 0;
+}
+
+function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, onReload }) {
   const seriesKey = `subscription:${item.id}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -320,8 +340,8 @@ function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
         <div className="relative aspect-[2/3] bg-gray-100">
           {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
-          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${locked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            {locked.length ? `待审${locked.length}` : '已追踪'}
+          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${missingCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : locked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+            {missingCount > 0 ? `缺${missingCount}集` : locked.length ? `待审${locked.length}` : '已追踪'}
           </span>
           {!item.enabled && <span className="absolute left-2 top-2 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600">停用</span>}
           {points > 0 && <div className="absolute bottom-8 left-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700 shadow-sm">{points}积分</div>}
@@ -332,14 +352,14 @@ function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{item.title}</p>
-          <p className="mt-0.5 text-[10px] text-gray-400">PanSou {pansouCount} · HDHive {hdhiveCount}</p>
+          <p className="mt-0.5 text-[10px] text-gray-400">{missingCount > 0 ? `缺${missingCount}集 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
         </div>
       </div>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 px-4 pb-8 overflow-y-auto" onClick={() => setOpen(false)}>
           <div className="fixed inset-0 bg-black/40" />
-          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-lg my-auto" onClick={e => e.stopPropagation()}>
+          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-5xl my-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-start gap-3 p-4 border-b border-gray-100">
               {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="w-14 h-[83px] rounded object-cover shrink-0 bg-gray-100" alt="" /> : <div className="w-14 h-[83px] rounded bg-gray-100 shrink-0 flex items-center justify-center text-xl">🎬</div>}
               <div className="min-w-0 flex-1">
@@ -348,6 +368,7 @@ function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
                 <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] font-semibold">
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">PanSou {pansouCount}</span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">HDHive {hdhiveCount}</span>
+                  {missingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {missingCount}</span>}
                   {locked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {locked.length}</span>}
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs text-gray-500">{item.overview || item.lastMessage || '点下方按钮搜索资源，支持转存 115、HDHive 解锁和 MoviePilot 下载。'}</p>
@@ -384,8 +405,8 @@ function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
                     <p className="text-xs font-bold text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
                     {totalPages > 1 && <div className="flex gap-1"><button type="button" onClick={() => setMpPage(p => Math.max(1, p - 1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button><button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p + 1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button></div>}
                   </div>
-                  <div className="space-y-1.5">
-                    {pageMP.map((resource, index) => <div key={`mp-${index}`} className="rounded-md p-2 border border-gray-100 bg-gray-50"><div className="flex items-start justify-between gap-2"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{resource.title}</p>{resource.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{resource.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{resource.source}{resource.size ? ` · ${resource.size}` : ''}{resource.seeders ? ` · ${resource.seeders}↑` : ''}</p></div><button type="button" onClick={() => doMPDownload(resource)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button></div></div>)}
+                  <div className="grid gap-2 lg:grid-cols-3">
+                    {pageMP.map((resource, index) => <div key={`mp-${index}`} className="rounded-md p-2 border border-gray-100 bg-gray-50"><div className="flex h-full flex-col gap-2"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{resource.title}</p>{resource.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{resource.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{resource.source}{resource.size ? ` · ${resource.size}` : ''}{resource.seeders ? ` · ${resource.seeders}↑` : ''}</p></div><button type="button" onClick={() => doMPDownload(resource)} className="self-start text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button></div></div>)}
                   </div>
                 </div>
               )}
