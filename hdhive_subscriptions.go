@@ -958,6 +958,43 @@ func (c *hdhiveClient) Login(username, password string) (map[string]any, error) 
 }
 
 func (c *hdhiveClient) Checkin(gamble bool) (hdhiveCheckinResult, error) {
+	if result, err := c.checkinViaWeb(gamble); err == nil {
+		return result, nil
+	} else if !strings.Contains(err.Error(), "404") && !strings.Contains(err.Error(), "未获取到 HDHive 签到页面") {
+		return hdhiveCheckinResult{}, err
+	}
+	return c.checkinViaAPI(gamble)
+}
+
+func (c *hdhiveClient) checkinViaWeb(gamble bool) (hdhiveCheckinResult, error) {
+	pagePath, pageHTML, err := c.loadCheckinPage()
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	actionID, err := c.resolveActionID(pageHTML, "checkIn")
+	if err != nil || actionID == "" {
+		return hdhiveCheckinResult{}, firstErr(err, errors.New("未找到 HDHive checkIn action"))
+	}
+	body, _ := json.Marshal([]bool{gamble})
+	responseRaw, err := c.postHDHiveAction(pagePath, actionID, body)
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	payload := parseHDHiveActionPayload(responseRaw)
+	return checkinResultFromPayload(payload, "HDHive 签到完成"), nil
+}
+
+func (c *hdhiveClient) loadCheckinPage() (string, string, error) {
+	for _, path := range []string{"/user/signin", "/user/checkin"} {
+		raw, err := c.fetchText(path)
+		if err == nil && strings.TrimSpace(raw) != "" {
+			return path, raw, nil
+		}
+	}
+	return "", "", errors.New("未获取到 HDHive 签到页面，请检查 Cookie")
+}
+
+func (c *hdhiveClient) checkinViaAPI(gamble bool) (hdhiveCheckinResult, error) {
 	body := map[string]any{}
 	if gamble {
 		body["is_gambler"] = true
@@ -982,19 +1019,7 @@ func (c *hdhiveClient) Checkin(gamble bool) (hdhiveCheckinResult, error) {
 	if err := json.Unmarshal(respRaw, &payload); err != nil {
 		return hdhiveCheckinResult{}, err
 	}
-	data, _ := payload["data"].(map[string]any)
-	checkedIn := optionalBool(firstNonNil(data["checked_in"], data["checkedIn"], payload["checked_in"], payload["checkedIn"]))
-	message := firstNonEmpty(anyToString(payload["message"]), anyToString(data["message"]))
-	pointsEarned := firstInt(data["points_earned"], data["pointsEarned"], data["earned"], data["change"], payload["points_earned"], payload["pointsEarned"])
-	points := firstInt(data["total_points"], data["totalPoints"], data["balance"], payload["points"])
-	status := "success"
-	if strings.Contains(message, "已") || strings.Contains(strings.ToLower(message), "already") {
-		status = "already_checked"
-	}
-	if message == "" {
-		message = "HDHive 签到完成"
-	}
-	return hdhiveCheckinResult{OK: true, Status: status, Message: message, PointsEarned: pointsEarned, Points: points, CheckedIn: checkedIn, Raw: payload}, nil
+	return checkinResultFromPayload(payload, "HDHive 签到完成"), nil
 }
 
 func (c *hdhiveClient) Search(keyword, mediaType string, tmdbID int) ([]hdhiveResource, error) {
@@ -1607,6 +1632,56 @@ func extractHDHiveActionMessage(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+func parseHDHiveActionPayload(raw []byte) map[string]any {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return map[string]any{"success": false, "message": "空响应"}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "1:") {
+			line = strings.TrimPrefix(line, "1:")
+			var payload map[string]any
+			if json.Unmarshal([]byte(line), &payload) == nil {
+				return normalizeHDHiveActionPayload(payload)
+			}
+		}
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(text), &payload) == nil {
+		return normalizeHDHiveActionPayload(payload)
+	}
+	return map[string]any{"success": false, "message": "未获取到响应数据"}
+}
+
+func normalizeHDHiveActionPayload(payload map[string]any) map[string]any {
+	if response, ok := payload["response"].(map[string]any); ok {
+		response["raw"] = payload
+		return response
+	}
+	if errObj, ok := payload["error"].(map[string]any); ok {
+		return map[string]any{"success": false, "message": firstNonEmpty(anyToString(errObj["message"]), anyToString(errObj["description"]), "请求失败"), "data": errObj["data"], "raw": payload}
+	}
+	return payload
+}
+
+func checkinResultFromPayload(payload map[string]any, fallbackMessage string) hdhiveCheckinResult {
+	data, _ := payload["data"].(map[string]any)
+	if data == nil {
+		data = map[string]any{}
+	}
+	checkedIn := optionalBool(firstNonNil(data["checked_in"], data["checkedIn"], payload["checked_in"], payload["checkedIn"]))
+	message := firstNonEmpty(anyToString(payload["message"]), anyToString(data["message"]), fallbackMessage)
+	pointsEarned := firstInt(data["points_earned"], data["pointsEarned"], data["earned"], data["change"], payload["points_earned"], payload["pointsEarned"])
+	points := firstInt(data["total_points"], data["totalPoints"], data["balance"], payload["points"])
+	status := "success"
+	normalizedMessage := strings.ToLower(message)
+	if checkedIn != nil && !*checkedIn || strings.Contains(message, "已签到") || strings.Contains(message, "已经签到") || strings.Contains(message, "今日已签到") || strings.Contains(message, "今天已签到") || strings.Contains(normalizedMessage, "already") {
+		status = "already_checked"
+	}
+	return hdhiveCheckinResult{OK: status == "success", Status: status, Message: message, PointsEarned: pointsEarned, Points: points, CheckedIn: checkedIn, Raw: payload}
 }
 
 func extractHDHiveAccessCode(raw string) string {
