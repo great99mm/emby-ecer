@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { CheckCircle2, ExternalLink, Play, Plus, Search, Trash2, RefreshCw, Unlock } from 'lucide-react';
+import useStore from '../store';
+import SearchResults from '../components/SearchResults';
+import StatCard from '../components/StatCard';
+import { CheckCircle2, Download, ExternalLink, Film, Play, Plus, Search, Sparkles, Trash2, RefreshCw, Timer, Tv, Unlock, X } from 'lucide-react';
 
 const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled: true, autoTransfer: false, targetCid: '0' };
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
@@ -17,6 +20,10 @@ export default function Subscriptions() {
   const [tmdbLoading, setTmdbLoading] = useState(false);
   const [tmdbResults, setTmdbResults] = useState([]);
   const [selectedTMDB, setSelectedTMDB] = useState(null);
+
+  const enabledCount = items.filter(item => item.enabled).length;
+  const lockedCount = items.reduce((sum, item) => sum + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0);
+  const resultCount = items.reduce((sum, item) => sum + (item.lastResults || []).length, 0);
 
   const load = async () => {
     try {
@@ -121,14 +128,30 @@ export default function Subscriptions() {
   };
 
   return (
-    <div className="space-y-5">
-      <div className="card">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-black text-gray-900">订阅与自动扫描</h1>
-            <p className="mt-1 text-sm text-gray-500">按标题/TMDB 追踪 HDHive 115 资源，可结合大模型自动排序候选。</p>
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
+        <StatCard label="订阅" value={items.length} icon={Timer} />
+        <StatCard label="启用中" value={enabledCount} icon={CheckCircle2} />
+        <StatCard label="候选资源" value={resultCount} icon={Search} />
+        <StatCard label="待审批" value={lockedCount} icon={Unlock} accent />
+        <StatCard label="自动转存" value={items.filter(item => item.autoTransfer).length} icon={Download} />
+      </div>
+
+      <div className="card overflow-hidden p-0">
+        <div className="bg-gradient-to-r from-primary-600 via-primary-500 to-blue-500 px-5 py-5 text-white">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-primary-100">Subscription Scan</p>
+              <h1 className="mt-1 text-2xl font-black tracking-tight">订阅与自动扫描</h1>
+              <p className="mt-2 text-sm text-blue-100">按 TMDB 订阅追踪 PanSou、HDHive 和 MoviePilot 资源，点开卡片可搜索、解锁和转存。</p>
+            </div>
+            <div className="hidden sm:flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/15 backdrop-blur">
+              <Timer className="w-6 h-6" />
+            </div>
           </div>
-          <button onClick={() => run()} disabled={running || !items.length} className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50">
+        </div>
+        <div className="px-5 py-4">
+          <button onClick={() => run()} disabled={running || !items.length} className="btn-primary w-full flex items-center justify-center gap-2 text-sm disabled:opacity-50">
             {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} 扫描全部
           </button>
         </div>
@@ -201,8 +224,8 @@ export default function Subscriptions() {
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {items.length === 0 ? <div className="card text-center text-sm text-gray-500">暂无订阅</div> : items.map(item => (
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+        {items.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : items.map(item => (
           <SubscriptionCard key={item.id} item={item} running={running} onRun={run} onRemove={remove} onReload={load} />
         ))}
       </div>
@@ -213,83 +236,171 @@ export default function Subscriptions() {
 }
 
 function SubscriptionCard({ item, running, onRun, onRemove, onReload }) {
-  const [unlockingSlug, setUnlockingSlug] = useState('');
+  const seriesKey = `subscription:${item.id}`;
+  const search = useStore(s => s.seriesSearches[seriesKey]);
+  const setSeriesSearch = useStore(s => s.setSeriesSearch);
+  const [open, setOpen] = useState(false);
+  const [mpPage, setMpPage] = useState(1);
   const results = item.lastResults || [];
   const locked = results.filter(r => r.source === 'HDHive' && r.hdhiveLocked);
   const points = locked.reduce((sum, r) => sum + (Number(r.unlockPoints) || 0), 0);
   const hdhiveCount = results.filter(r => r.source === 'HDHive').length;
   const pansouCount = results.filter(r => r.source !== 'HDHive').length;
+  const pageSize = 20;
+  const queryTitle = item.season && item.mediaType !== 'movie' ? `${item.title} S${String(item.season).padStart(2, '0')}` : item.title;
+  const seasonCode = item.season && item.mediaType !== 'movie' ? `S${String(item.season).padStart(2, '0')}` : '';
+  const searchCodes = seasonCode || item.title;
 
-  const approveUnlock = async (resource) => {
-    if (!window.confirm(`确认消耗 ${resource.unlockPoints || 0} 积分解锁这个 HDHive 资源？`)) return;
-    setUnlockingSlug(resource.hdhiveSlug);
+  const doPanSearch = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes: searchCodes }));
     try {
-      await api('/api/hdhive/unlock', {
-        method: 'POST',
-        body: JSON.stringify({ slug: resource.hdhiveSlug, title: resource.title, subscriptionId: item.id }),
-      });
-      toast.success('解锁成功，已写回订阅结果');
-      await onReload?.();
+      const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: queryTitle }) });
+      setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, results: data.results || [], query: data.query || queryTitle, codes: searchCodes }));
     } catch (err) {
-      toast.error(err.message);
-    } finally {
-      setUnlockingSlug('');
+      setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, error: err.message, codes: searchCodes }));
     }
   };
 
+  const doHDHiveSearch = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: true, codes: searchCodes }));
+    try {
+      const data = await api('/api/hdhive/search', {
+        method: 'POST',
+        body: JSON.stringify({ keyword: item.title, mediaType: item.mediaType || 'tv', tmdbId: item.tmdbId || 0 }),
+      });
+      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, results: [...(prev?.results || []), ...(data.results || [])], query: queryTitle, codes: searchCodes }));
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, error: err.message, codes: searchCodes }));
+    }
+  };
+
+  const doMPSearch = async () => {
+    const keywords = [queryTitle];
+    if (item.tmdbId) keywords.unshift(`tmdb:${item.tmdbId}`);
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpKeywords: keywords }));
+    try {
+      const body = { keyword: queryTitle };
+      if (item.tmdbId) body.tmdbId = String(item.tmdbId);
+      const data = await api('/api/mp/search', { method: 'POST', body: JSON.stringify(body) });
+      const arr = Array.isArray(data.results) ? data.results : [];
+      const mpResults = arr.map(r => ({
+        title: r.title || r.description || '',
+        description: r.description || '',
+        url: r.enclosure || r.page_url || r.torrent_url || r.magnet || '',
+        size: r.size ? (r.size >= 1e9 ? (r.size / 1e9).toFixed(1) + 'GB' : r.size >= 1e6 ? (r.size / 1e6).toFixed(0) + 'MB' : r.size + 'B') : '',
+        seeders: r.seeders || 0,
+        source: r.site_name || r.site || '',
+        pubdate: r.pubdate || '',
+        raw: r,
+      }));
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpResults, query: queryTitle, codes: searchCodes }));
+      setMpPage(1);
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpError: err.message }));
+    }
+  };
+
+  const doMPDownload = async (resource) => {
+    try {
+      await api('/api/mp/download', { method: 'POST', body: JSON.stringify({ rawData: resource.raw, tmdbId: String(item.tmdbId || '') }) });
+      toast.success('已提交下载');
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const allMP = search?.mpResults || [];
+  const totalPages = Math.max(1, Math.ceil(allMP.length / pageSize));
+  const pageMP = allMP.slice((mpPage - 1) * pageSize, mpPage * pageSize);
+  const panResults = search?.results || results;
+
   return (
-    <div className="card overflow-hidden p-0">
-      <div className="relative aspect-[2/3] bg-gray-100">
-        {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
-        <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent" />
-        {points > 0 && <div className="absolute right-2 top-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-black text-amber-700 shadow-sm">{points}积分</div>}
-        {!item.enabled && <div className="absolute left-2 top-2 rounded-full border border-white/60 bg-white/90 px-2 py-1 text-[11px] font-bold text-gray-500">停用</div>}
-        <div className="absolute bottom-0 left-0 right-0 p-3 text-white">
-          <div className="flex items-center gap-1.5">
-            <h2 className="min-w-0 flex-1 truncate text-base font-black">{item.title}</h2>
-            <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] font-bold backdrop-blur">{item.mediaType === 'movie' ? '电影' : '剧集'}</span>
+    <>
+      <div onClick={() => setOpen(true)} className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow">
+        <div className="relative aspect-[2/3] bg-gray-100">
+          {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${locked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+            {locked.length ? `待审${locked.length}` : '已追踪'}
+          </span>
+          {!item.enabled && <span className="absolute left-2 top-2 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600">停用</span>}
+          {points > 0 && <div className="absolute bottom-8 left-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700 shadow-sm">{points}积分</div>}
+          <div className="absolute bottom-0 left-0 right-0 p-2 text-white">
+            <p className="truncate text-xs font-bold">{item.title}</p>
+            <p className="mt-0.5 text-[10px] text-white/75">{item.mediaType === 'movie' ? '电影' : '剧集'} · {item.tmdbYear || '未知年份'}{item.season ? ` · S${String(item.season).padStart(2, '0')}` : ''}</p>
           </div>
-          <p className="mt-1 text-[11px] font-semibold text-white/70">{item.tmdbYear || '未知年份'} · TMDB {item.tmdbId || '未填'}{item.season ? ` · S${String(item.season).padStart(2, '0')}` : ''}</p>
+        </div>
+        <div className="px-2.5 py-2">
+          <p className="text-xs font-bold text-gray-900 truncate">{item.title}</p>
+          <p className="mt-0.5 text-[10px] text-gray-400">PanSou {pansouCount} · HDHive {hdhiveCount}</p>
         </div>
       </div>
-      <div className="space-y-3 p-3">
-        <p className="line-clamp-2 min-h-[2.5rem] text-xs leading-5 text-gray-500">{item.overview || '暂无简介。订阅计划任务会定时从 PanSou 和 HDHive 搜索候选资源。'}</p>
-        <div className="grid grid-cols-3 gap-1 text-center text-[11px] font-bold">
-          <div className="rounded-md bg-gray-50 px-2 py-1 text-gray-500">PanSou {pansouCount}</div>
-          <div className="rounded-md bg-gray-50 px-2 py-1 text-gray-500">HDHive {hdhiveCount}</div>
-          <div className={`rounded-md px-2 py-1 ${locked.length ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-600'}`}>{locked.length ? `待审 ${locked.length}` : '无待审'}</div>
-        </div>
-        <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}</p>
-        {item.lastMessage && <p className="line-clamp-2 text-xs text-gray-500">{item.lastMessage}</p>}
-        {!!locked.length && (
-          <details className="rounded-lg border border-amber-100 bg-amber-50/50 p-2">
-            <summary className="cursor-pointer text-xs font-bold text-amber-700">待审批解锁资源</summary>
-            <div className="mt-2 space-y-1.5">
-              {locked.slice(0, 4).map((r, i) => (
-                <div key={i} className="rounded bg-white px-2 py-1 text-xs text-gray-600">
-                  <div><b>{r.unlockPoints || 0}积分</b> · {r.title}</div>
-                  <button type="button" onClick={() => approveUnlock(r)} disabled={unlockingSlug === r.hdhiveSlug || running} className="mt-1 inline-flex items-center gap-1 rounded border border-amber-200 px-2 py-1 text-[11px] font-bold text-amber-700 hover:bg-amber-50 disabled:opacity-50">
-                    <Unlock className="h-3 w-3" /> {unlockingSlug === r.hdhiveSlug ? '解锁中' : '审批解锁'}
-                  </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 px-4 pb-8 overflow-y-auto" onClick={() => setOpen(false)}>
+          <div className="fixed inset-0 bg-black/40" />
+          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-lg my-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3 p-4 border-b border-gray-100">
+              {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="w-14 h-[83px] rounded object-cover shrink-0 bg-gray-100" alt="" /> : <div className="w-14 h-[83px] rounded bg-gray-100 shrink-0 flex items-center justify-center text-xl">🎬</div>}
+              <div className="min-w-0 flex-1">
+                <h2 className="text-base font-bold text-gray-900">{item.title}</h2>
+                <p className="text-xs text-gray-400 mt-0.5">TMDB {item.tmdbId || '未填'}{item.tmdbYear ? ` · ${item.tmdbYear}` : ''}{item.season ? ` · S${String(item.season).padStart(2, '0')}` : ''}</p>
+                <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] font-semibold">
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">PanSou {pansouCount}</span>
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">HDHive {hdhiveCount}</span>
+                  {locked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {locked.length}</span>}
                 </div>
-              ))}
+                <p className="mt-1 line-clamp-2 text-xs text-gray-500">{item.overview || item.lastMessage || '点下方按钮搜索资源，支持转存 115、HDHive 解锁和 MoviePilot 下载。'}</p>
+              </div>
+              <div className="shrink-0 flex items-center gap-1">
+                <button title="扫描此订阅" onClick={() => onRun(item.id)} disabled={running} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40">
+                  <RefreshCw className={`w-4 h-4 text-gray-400 ${running ? 'animate-spin' : ''}`} />
+                </button>
+                <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
+              </div>
             </div>
-          </details>
-        )}
-        {!!results.length && (
-          <details className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-            <summary className="cursor-pointer text-xs font-bold text-gray-500">最近候选 {results.length} 条</summary>
-            <div className="mt-2 space-y-1.5">
-              {results.slice(0, 5).map((r, i) => <div key={i} className="rounded bg-white px-2 py-1 text-xs text-gray-600"><b>{r.source}</b> · {r.title}</div>)}
+
+            <div className="px-4 py-3 grid grid-cols-3 gap-2">
+              <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
+                <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP中' : 'MP搜索'}
+              </button>
+              <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
+                <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? '蜂巢中' : 'HDHive'}
+              </button>
+              <button type="button" onClick={doPanSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-md bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
+                <Search className="w-4 h-4" /> {search?.loading ? '盘搜中' : '盘搜搜索'}
+              </button>
             </div>
-          </details>
-        )}
-        <div className="grid grid-cols-[1fr_auto] gap-2">
-          <button onClick={() => onRun(item.id)} disabled={running} className="rounded-md border border-gray-300 px-2.5 py-2 text-xs font-semibold text-gray-600 hover:text-primary-600 disabled:opacity-40">扫描</button>
-          <button onClick={() => onRemove(item.id)} className="rounded-md border border-red-200 px-2.5 py-2 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /></button>
+
+            <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
+              {search?.mpKeywords && <div className="flex flex-wrap gap-1 mb-2">{search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}</div>}
+              {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
+              {search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
+              {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
+
+              {allMP.length > 0 && (
+                <div className="mb-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-bold text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
+                    {totalPages > 1 && <div className="flex gap-1"><button type="button" onClick={() => setMpPage(p => Math.max(1, p - 1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button><button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p + 1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button></div>}
+                  </div>
+                  <div className="space-y-1.5">
+                    {pageMP.map((resource, index) => <div key={`mp-${index}`} className="rounded-md p-2 border border-gray-100 bg-gray-50"><div className="flex items-start justify-between gap-2"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{resource.title}</p>{resource.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{resource.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{resource.source}{resource.size ? ` · ${resource.size}` : ''}{resource.seeders ? ` · ${resource.seeders}↑` : ''}</p></div><button type="button" onClick={() => doMPDownload(resource)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button></div></div>)}
+                  </div>
+                </div>
+              )}
+
+              {(panResults.length > 0 || search?.results) && <SearchResults search={{ ...(search || {}), results: panResults, query: search?.query || queryTitle, codes: searchCodes }} targetCid={item.targetCid || ''} subscriptionId={item.id} onUnlocked={onReload} />}
+              {!search && results.length === 0 && <p className="text-sm text-gray-400 py-3 text-center">还没有候选资源，点击上方按钮搜索或扫描此订阅。</p>}
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
+              <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}{item.autoTransfer ? ' · 自动转存' : ''}</p>
+              <button onClick={() => onRemove(item.id)} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
+            </div>
+          </div>
         </div>
-        {item.autoTransfer && <p className="text-[11px] font-semibold text-primary-600">命中可转存链接后自动转存</p>}
-      </div>
-    </div>
+      )}
+    </>
   );
 }

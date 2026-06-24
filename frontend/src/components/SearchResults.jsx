@@ -4,7 +4,7 @@ import { api } from '../api';
 import toast from 'react-hot-toast';
 import { Download, Unlock } from 'lucide-react';
 
-export default function SearchResults({ search }) {
+export default function SearchResults({ search, targetCid = '', subscriptionId = '', onUnlocked }) {
   const transfers = useStore(s => s.transfers);
   const setTransfer = useStore(s => s.setTransfer);
   const [unlockedResults, setUnlockedResults] = useState({});
@@ -43,7 +43,7 @@ export default function SearchResults({ search }) {
     try {
       const data = await api('/api/115/transfer', {
         method: 'POST',
-        body: JSON.stringify({ url: result.url, password: result.password }),
+        body: JSON.stringify({ url: result.url, password: result.password, targetCid }),
       });
       setTransfer(key, { ok: true, count: data.count, targetCid: data.targetCid });
       toast.success('转存成功');
@@ -59,11 +59,12 @@ export default function SearchResults({ search }) {
     try {
       const data = await api('/api/hdhive/unlock', {
         method: 'POST',
-        body: JSON.stringify({ slug: result.hdhiveSlug, title: result.title }),
+        body: JSON.stringify({ slug: result.hdhiveSlug, title: result.title, subscriptionId }),
       });
       const unlocked = { ...result, ...(data.result || {}), hdhiveLocked: false };
       setUnlockedResults(prev => ({ ...prev, [key]: unlocked }));
       setTransfer(key, {});
+      onUnlocked?.(unlocked);
       toast.success('HDHive 解锁成功，可转存');
     } catch (err) {
       setTransfer(key, { error: err.message });
