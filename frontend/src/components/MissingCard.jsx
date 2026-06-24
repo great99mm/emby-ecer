@@ -212,25 +212,21 @@ export default function MissingCard({ group, selectable = false, selected = fals
               </div>
             </div>
             <div className="px-4 py-3 border-b border-gray-100">
-              {activeSource === 'mp' && (
-                <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
-                  <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}
+              <div className="grid gap-2 sm:grid-cols-3">
+                <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
+                  <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : 'MP 搜索'}
                 </button>
-              )}
-              {activeSource === 'hdhive' && (
-                <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
-                  <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}
+                <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
+                  <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : 'HDHive 搜索'}
                 </button>
-              )}
-              {activeSource === 'pan' && (
-                <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50">
-                  <Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}
+                <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary flex items-center justify-center gap-1.5 text-sm disabled:opacity-50">
+                  <Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '盘搜搜索'}
                 </button>
-              )}
-              <div className="mt-2 grid grid-cols-3 overflow-hidden rounded-md border border-gray-200 bg-gray-50 text-[11px] font-bold">
-                <button type="button" onClick={() => setActiveSource('mp')} className={`px-2 py-1.5 ${activeSource === 'mp' ? 'bg-white text-primary-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>MP{allMP.length ? ` · ${allMP.length}` : ''}</button>
-                <button type="button" onClick={() => setActiveSource('hdhive')} className={`border-x border-gray-200 px-2 py-1.5 ${activeSource === 'hdhive' ? 'bg-white text-amber-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>HDHive · {panResults.filter(r => r.source === 'HDHive').length}</button>
-                <button type="button" onClick={() => setActiveSource('pan')} className={`px-2 py-1.5 ${activeSource === 'pan' ? 'bg-white text-primary-700 shadow-sm' : 'text-gray-500 hover:bg-white/70'}`}>盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}</button>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-start gap-3 text-[11px] font-bold">
+                <button type="button" onClick={() => setActiveSource('mp')} className={`${activeSource === 'mp' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>MP{allMP.length ? ` · ${allMP.length}` : ''}</button>
+                <button type="button" onClick={() => setActiveSource('hdhive')} className={`${activeSource === 'hdhive' ? 'text-amber-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>HDHive · {panResults.filter(r => r.source === 'HDHive').length}</button>
+                <button type="button" onClick={() => setActiveSource('pan')} className={`${activeSource === 'pan' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}</button>
               </div>
             </div>
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
