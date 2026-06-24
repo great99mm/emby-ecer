@@ -212,7 +212,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
               </div>
             </div>
             <div className="px-4 py-3 border-b border-gray-100">
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-3 gap-2">
                 <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
                   <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : 'MP 搜索'}
                 </button>
@@ -223,7 +223,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
                   <Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '盘搜搜索'}
                 </button>
               </div>
-              <div className="mt-2 flex flex-wrap items-center justify-start gap-3 text-[11px] font-bold">
+              <div className="mt-2 flex flex-wrap items-center justify-start gap-3 text-xs font-bold">
                 <button type="button" onClick={() => setActiveSource('mp')} className={`${activeSource === 'mp' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>MP{allMP.length ? ` · ${allMP.length}` : ''}</button>
                 <button type="button" onClick={() => setActiveSource('hdhive')} className={`${activeSource === 'hdhive' ? 'text-amber-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>HDHive · {panResults.filter(r => r.source === 'HDHive').length}</button>
                 <button type="button" onClick={() => setActiveSource('pan')} className={`${activeSource === 'pan' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}</button>
