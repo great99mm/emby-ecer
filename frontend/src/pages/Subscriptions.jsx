@@ -260,6 +260,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
   const [open, setOpen] = useState(false);
+  const [activeSource, setActiveSource] = useState('mp');
   const [mpPage, setMpPage] = useState(1);
   const results = item.lastResults || [];
   const locked = results.filter(r => r.source === 'HDHive' && r.hdhiveLocked);
@@ -272,6 +273,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   const searchCodes = seasonCode || item.title;
 
   const doPanSearch = async () => {
+    setActiveSource('pan');
     setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes: searchCodes }));
     try {
       const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: queryTitle }) });
@@ -282,6 +284,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   };
 
   const doHDHiveSearch = async () => {
+    setActiveSource('hdhive');
     setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: true, codes: searchCodes }));
     try {
       const data = await api('/api/hdhive/search', {
@@ -295,6 +298,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   };
 
   const doMPSearch = async () => {
+    setActiveSource('mp');
     const keywords = [queryTitle];
     if (item.tmdbId) keywords.unshift(`tmdb:${item.tmdbId}`);
     setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpKeywords: keywords }));
@@ -333,6 +337,9 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   const totalPages = Math.max(1, Math.ceil(allMP.length / pageSize));
   const pageMP = allMP.slice((mpPage - 1) * pageSize, mpPage * pageSize);
   const panResults = search?.results || results;
+  const hdhiveResults = panResults.filter(r => r.source === 'HDHive');
+  const pansouResults = panResults.filter(r => r.source !== 'HDHive');
+  const visibleResults = activeSource === 'hdhive' ? hdhiveResults : pansouResults;
 
   return (
     <>
@@ -381,38 +388,46 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
               </div>
             </div>
 
-            <div className="px-4 py-3 grid grid-cols-3 gap-2">
-              <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
-                <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP中' : 'MP搜索'}
+            <div className="grid grid-cols-3 border-b border-gray-100 text-sm font-bold">
+              <button type="button" onClick={() => setActiveSource('mp')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'mp' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Download className="w-4 h-4" /> MP{allMP.length ? ` · ${allMP.length}` : ''}
               </button>
-              <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
-                <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? '蜂巢中' : 'HDHive'}
+              <button type="button" onClick={() => setActiveSource('hdhive')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'hdhive' ? 'bg-amber-50 text-amber-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Sparkles className="w-4 h-4" /> HDHive · {hdhiveResults.length}
               </button>
-              <button type="button" onClick={doPanSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-md bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
-                <Search className="w-4 h-4" /> {search?.loading ? '盘搜中' : '盘搜搜索'}
+              <button type="button" onClick={() => setActiveSource('pan')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'pan' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Search className="w-4 h-4" /> 盘搜 · {pansouResults.length}
               </button>
             </div>
 
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
-              {search?.mpKeywords && <div className="flex flex-wrap gap-1 mb-2">{search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}</div>}
-              {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
-              {search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
-              {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
+              {activeSource === 'mp' && <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50"><Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}</button>}
+              {activeSource === 'hdhive' && <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50"><Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}</button>}
+              {activeSource === 'pan' && <button type="button" onClick={doPanSearch} disabled={!!search?.loading} className="btn-primary mb-3 flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50"><Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}</button>}
 
-              {allMP.length > 0 && (
+              {activeSource === 'mp' && search?.mpKeywords && <div className="flex flex-wrap gap-1 mb-2">{search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}</div>}
+              {activeSource === 'mp' && search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
+              {activeSource === 'hdhive' && search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
+              {activeSource === 'pan' && search?.loading && <p className="text-sm text-gray-400 py-2">盘搜中...</p>}
+              {activeSource === 'mp' && search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
+              {activeSource !== 'mp' && search?.error && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.error}</p></div>}
+
+              {activeSource === 'mp' && allMP.length > 0 && (
                 <div className="mb-3">
                   <div className="mb-2 flex items-center justify-between">
                     <p className="text-xs font-bold text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
                     {totalPages > 1 && <div className="flex gap-1"><button type="button" onClick={() => setMpPage(p => Math.max(1, p - 1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button><button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p + 1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button></div>}
                   </div>
-                  <div className="grid gap-2 lg:grid-cols-3">
-                    {pageMP.map((resource, index) => <div key={`mp-${index}`} className="rounded-md p-2 border border-gray-100 bg-gray-50"><div className="flex h-full flex-col gap-2"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{resource.title}</p>{resource.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{resource.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{resource.source}{resource.size ? ` · ${resource.size}` : ''}{resource.seeders ? ` · ${resource.seeders}↑` : ''}</p></div><button type="button" onClick={() => doMPDownload(resource)} className="self-start text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button></div></div>)}
+                  <div className="space-y-1.5">
+                    {pageMP.map((resource, index) => <div key={`mp-${index}`} className="rounded-md p-2 border border-gray-100 bg-gray-50"><div className="flex items-start justify-between gap-2"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{resource.title}</p>{resource.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{resource.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{resource.source}{resource.size ? ` · ${resource.size}` : ''}{resource.seeders ? ` · ${resource.seeders}↑` : ''}</p></div><button type="button" onClick={() => doMPDownload(resource)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button></div></div>)}
                   </div>
                 </div>
               )}
+              {activeSource === 'mp' && allMP.length === 0 && !search?.mpLoading && search?.mpResults !== undefined && <p className="text-xs text-gray-400 py-2">MP无匹配结果</p>}
 
-              {(panResults.length > 0 || search?.results) && <SearchResults search={{ ...(search || {}), results: panResults, query: search?.query || queryTitle, codes: searchCodes }} targetCid={item.targetCid || ''} subscriptionId={item.id} onUnlocked={onReload} />}
-              {!search && results.length === 0 && <p className="text-sm text-gray-400 py-3 text-center">还没有候选资源，点击上方按钮搜索或扫描此订阅。</p>}
+              {activeSource !== 'mp' && visibleResults.length > 0 && <SearchResults search={{ ...(search || {}), results: visibleResults, query: search?.query || queryTitle, codes: searchCodes }} targetCid={item.targetCid || ''} subscriptionId={item.id} onUnlocked={onReload} />}
+              {activeSource !== 'mp' && visibleResults.length === 0 && !search?.loading && !search?.hdhiveLoading && <p className="text-sm text-gray-400 py-3 text-center">这一栏还没有结果，点击上方按钮搜索。</p>}
+              {!search && results.length === 0 && activeSource === 'mp' && <p className="text-sm text-gray-400 py-3 text-center">还没有候选资源，点击上方按钮搜索或扫描此订阅。</p>}
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">

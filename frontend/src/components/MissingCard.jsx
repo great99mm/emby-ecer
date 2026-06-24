@@ -15,6 +15,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
   const setJobStatus = useStore(s => s.setJobStatus);
   const jobStatus = useStore(s => s.jobStatus);
   const [open, setOpen] = useState(false);
+  const [activeSource, setActiveSource] = useState('mp');
   const [mpPage, setMpPage] = useState(1);
   const pageSize = 20;
 
@@ -42,6 +43,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
   };
 
   const doSearch = async () => {
+    setActiveSource('pan');
     setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes }));
     try {
       const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: group.title }) });
@@ -52,6 +54,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
   };
 
   const doHDHiveSearch = async () => {
+    setActiveSource('hdhive');
     setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: true, codes }));
     try {
       const data = await api('/api/hdhive/search', {
@@ -66,6 +69,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
   };
 
   const doMPSearch = async () => {
+    setActiveSource('mp');
     const keywords = [group.title];
     if (group.tmdbId) keywords.unshift(`tmdb:${group.tmdbId}`);
     setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpKeywords: keywords }));
@@ -128,8 +132,11 @@ export default function MissingCard({ group, selectable = false, selected = fals
   const unmatchedMP = pageMP.filter(r => matchCode(r) === false);
   const matchedAll = allMP.filter(r => matchCode(r) !== false).length;
   const panResults = search?.results || [];
-  const matchedPan = panResults.filter(r => matchCode(r) !== false);
-  const unmatchedPan = panResults.filter(r => matchCode(r) === false);
+  const hdhiveResults = panResults.filter(r => r.source === 'HDHive');
+  const pansouResults = panResults.filter(r => r.source !== 'HDHive');
+  const visiblePanResults = activeSource === 'hdhive' ? hdhiveResults : pansouResults;
+  const matchedPan = visiblePanResults.filter(r => matchCode(r) !== false);
+  const unmatchedPan = visiblePanResults.filter(r => matchCode(r) === false);
 
   // Poster Card
   return (
@@ -204,120 +211,112 @@ export default function MissingCard({ group, selectable = false, selected = fals
                 <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
               </div>
             </div>
-            <div className="px-4 py-3 grid grid-cols-3 gap-2">
-              <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
-                <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP中' : 'MP搜索'}
+            <div className="grid grid-cols-3 border-b border-gray-100 text-sm font-bold">
+              <button type="button" onClick={() => setActiveSource('mp')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'mp' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Download className="w-4 h-4" /> MP{allMP.length ? ` · ${allMP.length}` : ''}
               </button>
-              <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
-                <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? '蜂巢中' : 'HDHive'}
+              <button type="button" onClick={() => setActiveSource('hdhive')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'hdhive' ? 'bg-amber-50 text-amber-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Sparkles className="w-4 h-4" /> HDHive · {panResults.filter(r => r.source === 'HDHive').length}
               </button>
-              <button type="button" onClick={doSearch} disabled={!!search?.loading} className="flex items-center justify-center gap-1.5 rounded-md bg-primary-600 hover:bg-primary-700 text-white px-3 py-2 text-sm font-semibold disabled:opacity-50">
-                <Search className="w-4 h-4" /> {search?.loading ? '盘搜中' : '盘搜搜索'}
+              <button type="button" onClick={() => setActiveSource('pan')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'pan' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <Search className="w-4 h-4" /> 盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}
               </button>
             </div>
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
-              {search?.mpKeywords && (
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}
-                </div>
-              )}
-              {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
-              {search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
-              {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
-
-              {/* MP 结果统计 */}
-              {!search?.mpLoading && search?.mpResults !== undefined && (
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-xs text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
-                  {totalPages > 1 && (
-                    <div className="flex gap-1">
-                      <button type="button" onClick={() => setMpPage(p => Math.max(1, p-1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button>
-                      <button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p+1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button>
+              {activeSource === 'mp' && (
+                <>
+                  <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
+                    <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}
+                  </button>
+                  {search?.mpKeywords && (
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}
                     </div>
                   )}
-                </div>
-              )}
-
-              {matchedMP.length > 0 && (
-                <div className="mb-3">
-                  <p className="text-xs font-bold text-gray-400 mb-1.5">MP匹配 · {matchedAll}条</p>
-                  <div className="grid gap-2 lg:grid-cols-3">
-                  {matchedMP.map((r, i) => {
-                    const mt = matchType(r);
-                    return (
-                    <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30">
-                      <div className="flex h-full flex-col gap-2">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-gray-800">
-                            <span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1 ${mt === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{mt === 'include' ? '包含' : '✓'}</span>
-                            {r.title}
-                          </p>
-                          {r.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{r.description}</p>}
-                          <p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}{r.seeders ? ` · ${r.seeders}↑` : ''}</p>
+                  {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
+                  {!search?.mpLoading && search?.mpResults !== undefined && (
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
+                      {totalPages > 1 && (
+                        <div className="flex gap-1">
+                          <button type="button" onClick={() => setMpPage(p => Math.max(1, p-1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button>
+                          <button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p+1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button>
                         </div>
-                        <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
+                      )}
+                    </div>
+                  )}
+                  {matchedMP.length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-xs font-bold text-gray-400 mb-1.5">MP匹配 · {matchedAll}条</p>
+                      <div className="space-y-1.5">
+                        {matchedMP.map((r, i) => {
+                          const mt = matchType(r);
+                          return (
+                            <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-sm font-medium text-gray-800"><span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1 ${mt === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{mt === 'include' ? '包含' : '✓'}</span>{r.title}</p>
+                                  {r.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{r.description}</p>}
+                                  <p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}{r.seeders ? ` · ${r.seeders}↑` : ''}</p>
+                                </div>
+                                <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
-                  )})}
-                  </div>
-                </div>
-              )}
-
-              {unmatchedMP.length > 0 && (
-                (matchedMP.length === 0) ? (
-                  <div className="mt-1 grid gap-2 lg:grid-cols-3">
-                    {unmatchedMP.map((r, i) => (
-                      <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                        <div className="flex h-full flex-col gap-2">
-                          <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
-                          <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs text-primary-600">下载</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <details>
-                    <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">MP未匹配 · {unmatchedMP.length}条</summary>
-                    <div className="mt-1 grid gap-2 lg:grid-cols-3">
-                      {unmatchedMP.map((r, i) => (
-                        <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                          <div className="flex h-full flex-col gap-2">
-                            <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
-                            <button type="button" onClick={() => doMPDownload(r)} className="self-start text-xs text-primary-600">下载</button>
+                  )}
+                  {unmatchedMP.length > 0 && (
+                    matchedMP.length === 0 ? (
+                      <div className="mt-1 space-y-1.5">
+                        {unmatchedMP.map((r, i) => (
+                          <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
+                              <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )
-              )}
-
-              {allMP.length === 0 && matchedMP.length === 0 && unmatchedMP.length === 0 && !search?.mpLoading && search?.mpResults !== undefined && (
-                <p className="text-xs text-gray-400 py-2">MP无匹配结果</p>
-              )}
-
-              {panResults.length > 0 && (
-                <div className="mt-3">
-                  {matchedPan.length > 0 && (
-                    <div className="mb-2">
-                      <p className="text-xs font-bold text-gray-400 mb-1.5">盘搜匹配 · {matchedPan.length}条</p>
-                      <SearchResults search={{ ...search, results: matchedPan }} />
-                    </div>
-                  )}
-                  {unmatchedPan.length > 0 && (
-                    matchedPan.length === 0 ? (
-                      <div>
-                        <p className="text-xs font-bold text-gray-400 mb-1.5">盘搜结果 · {unmatchedPan.length}条</p>
-                        <SearchResults search={{ ...search, results: unmatchedPan }} />
+                        ))}
                       </div>
                     ) : (
                       <details>
-                        <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">盘搜未匹配 · {unmatchedPan.length}条</summary>
-                        <div className="mt-1"><SearchResults search={{ ...search, results: unmatchedPan }} /></div>
+                        <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">MP未匹配 · {unmatchedMP.length}条</summary>
+                        <div className="mt-1 space-y-1.5">
+                          {unmatchedMP.map((r, i) => (
+                            <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
+                                <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </details>
                     )
                   )}
-                </div>
+                  {allMP.length === 0 && matchedMP.length === 0 && unmatchedMP.length === 0 && !search?.mpLoading && search?.mpResults !== undefined && <p className="text-xs text-gray-400 py-2">MP无匹配结果</p>}
+                  {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
+                </>
+              )}
+
+              {activeSource !== 'mp' && (
+                <>
+                  {activeSource === 'hdhive' ? (
+                    <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-md border-2 border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50"><Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}</button>
+                  ) : (
+                    <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary mb-3 flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50"><Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}</button>
+                  )}
+                  {activeSource === 'hdhive' && search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
+                  {activeSource === 'pan' && search?.loading && <p className="text-sm text-gray-400 py-2">盘搜中...</p>}
+                  {search?.error && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.error}</p></div>}
+                  {visiblePanResults.length > 0 ? (
+                    <div className="mt-3">
+                      {matchedPan.length > 0 && <div className="mb-2"><p className="text-xs font-bold text-gray-400 mb-1.5">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}匹配 · {matchedPan.length}条</p><SearchResults search={{ ...search, results: matchedPan }} /></div>}
+                      {unmatchedPan.length > 0 && (matchedPan.length === 0 ? <div><p className="text-xs font-bold text-gray-400 mb-1.5">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}结果 · {unmatchedPan.length}条</p><SearchResults search={{ ...search, results: unmatchedPan }} /></div> : <details><summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}未匹配 · {unmatchedPan.length}条</summary><div className="mt-1"><SearchResults search={{ ...search, results: unmatchedPan }} /></div></details>)}
+                    </div>
+                  ) : (!search?.loading && !search?.hdhiveLoading && <p className="text-sm text-gray-400 py-3 text-center">这一栏还没有结果，点击上方按钮搜索。</p>)}
+                </>
               )}
             </div>
           </div>
