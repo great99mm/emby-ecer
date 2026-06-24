@@ -4,7 +4,7 @@ import toast from 'react-hot-toast';
 import useStore from '../store';
 import SearchResults from '../components/SearchResults';
 import StatCard from '../components/StatCard';
-import { CheckCircle2, Download, ExternalLink, Film, Play, Plus, Search, Sparkles, Trash2, RefreshCw, Timer, Tv, Unlock, X } from 'lucide-react';
+import { Archive, CheckCircle2, Download, ExternalLink, Film, Gift, Play, Plus, Search, Sparkles, Trash2, RefreshCw, Timer, Tv, Unlock, X } from 'lucide-react';
 
 const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled: true, autoTransfer: false, targetCid: '0' };
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
@@ -21,6 +21,7 @@ export default function Subscriptions() {
   const [tmdbLoading, setTmdbLoading] = useState(false);
   const [tmdbResults, setTmdbResults] = useState([]);
   const [selectedTMDB, setSelectedTMDB] = useState(null);
+  const [checkinLoading, setCheckinLoading] = useState(false);
 
   const groupedItems = groupSubscriptions(items);
   const enabledCount = groupedItems.filter(group => (group.items || []).some(item => item.enabled)).length;
@@ -131,6 +132,29 @@ export default function Subscriptions() {
     }
   };
 
+  const archiveSubscriptions = async (ids) => {
+    try {
+      const data = await api('/api/subscriptions/archive', { method: 'POST', body: JSON.stringify({ ids }) });
+      setItems(data.items || []);
+      toast.success('已归档');
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const checkin = async () => {
+    setCheckinLoading(true);
+    try {
+      const data = await api('/api/hdhive/checkin', { method: 'POST', body: JSON.stringify({}) });
+      const earned = Number(data.pointsEarned || 0);
+      toast.success(`${data.message || 'HDHive 签到完成'}${earned ? `，+${earned} 积分` : ''}`);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setCheckinLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
@@ -155,9 +179,14 @@ export default function Subscriptions() {
           </div>
         </div>
         <div className="px-5 py-4">
-          <button onClick={() => run()} disabled={running || !items.length} className="btn-primary w-full flex items-center justify-center gap-2 text-sm disabled:opacity-50">
-            {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} 扫描全部
-          </button>
+          <div className="grid gap-2 sm:grid-cols-[1fr_180px]">
+            <button onClick={() => run()} disabled={running || !items.length} className="btn-primary w-full flex items-center justify-center gap-2 text-sm disabled:opacity-50">
+              {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} 扫描全部
+            </button>
+            <button onClick={checkin} disabled={checkinLoading} className="flex items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-bold text-amber-700 hover:bg-amber-100 disabled:opacity-50">
+              {checkinLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Gift className="h-4 w-4" />} HDHive 签到
+            </button>
+          </div>
         </div>
       </div>
 
@@ -230,7 +259,7 @@ export default function Subscriptions() {
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
         {groupedItems.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : groupedItems.map(item => (
-          <SubscriptionCard key={item.id} item={item} missingMap={missingBySubscription} running={running} onRun={run} onRemove={remove} onReload={load} />
+          <SubscriptionCard key={item.id} item={item} missingMap={missingBySubscription} running={running} onRun={run} onRemove={remove} onArchive={archiveSubscriptions} onReload={load} />
         ))}
       </div>
 
@@ -245,10 +274,18 @@ function buildSubscriptionMissingMap(missing) {
     const tmdbId = Number(episode.tmdbId || 0);
     if (!tmdbId) continue;
     const season = Number(episode.season || 0);
-    out[`${tmdbId}:0`] = (out[`${tmdbId}:0`] || 0) + 1;
-    if (season > 0) out[`${tmdbId}:${season}`] = (out[`${tmdbId}:${season}`] || 0) + 1;
+    addMissingEpisode(out, `${tmdbId}:0`, episode);
+    if (season > 0) addMissingEpisode(out, `${tmdbId}:${season}`, episode);
   }
   return out;
+}
+
+function addMissingEpisode(out, key, episode) {
+  if (!out[key]) out[key] = { count: 0, totalEpisodes: 0, ownedEpisodes: 0, episodes: [] };
+  out[key].count += 1;
+  out[key].totalEpisodes = Math.max(out[key].totalEpisodes || 0, Number(episode.totalEpisodes || 0));
+  out[key].ownedEpisodes = Math.max(out[key].ownedEpisodes || 0, Number(episode.ownedEpisodes || 0));
+  out[key].episodes.push(episode);
 }
 
 function groupSubscriptions(items) {
@@ -276,17 +313,24 @@ function groupSubscriptions(items) {
 }
 
 function subscriptionMissingCount(item, missingMap) {
-  if (!item || item.mediaType === 'movie' || !item.tmdbId) return 0;
-  const season = Number(item.season || 0);
-  return missingMap[`${Number(item.tmdbId)}:${season}`] || 0;
+  return subscriptionProgress(item, missingMap).missing;
 }
 
-function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, onReload }) {
+function subscriptionProgress(item, missingMap) {
+  if (!item || item.mediaType === 'movie' || !item.tmdbId) return { missing: 0, owned: 0, total: 0, percent: 0, episodes: [] };
+  const season = Number(item.season || 0);
+  const info = missingMap[`${Number(item.tmdbId)}:${season}`] || { count: 0, totalEpisodes: 0, ownedEpisodes: 0, episodes: [] };
+  const total = Number(info.totalEpisodes || 0);
+  const owned = Number(info.ownedEpisodes || 0);
+  return { missing: info.count || 0, owned, total, percent: total > 0 ? Math.round((owned / total) * 100) : 0, episodes: info.episodes || [] };
+}
+
+function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, onArchive, onReload }) {
   const [selectedId, setSelectedId] = useState(group.items?.[0]?.id || group.id);
   const item = group.items?.find(current => current.id === selectedId) || group.items?.[0] || group;
   const groupItems = group.items || [item];
   const groupMissingCount = groupItems.reduce((sum, current) => sum + subscriptionMissingCount(current, missingMap), 0);
-  const missingCount = subscriptionMissingCount(item, missingMap);
+  const progress = subscriptionProgress(item, missingMap);
   const seriesKey = `subscription:${item.id}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -304,6 +348,12 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
   const queryTitle = item.season && item.mediaType !== 'movie' ? `${item.title} S${String(item.season).padStart(2, '0')}` : item.title;
   const seasonCode = item.season && item.mediaType !== 'movie' ? `S${String(item.season).padStart(2, '0')}` : '';
   const searchCodes = seasonCode || item.title;
+
+  const archive = async () => {
+    if (!window.confirm('确认归档这个订阅？归档后会隐藏并停止自动扫描。')) return;
+    await onArchive(groupItems.map(current => current.id));
+    setOpen(false);
+  };
 
   const doPanSearch = async () => {
     setActiveSource('pan');
@@ -392,7 +442,8 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{item.title}</p>
-          <p className="mt-0.5 text-[10px] text-gray-400">{groupMissingCount > 0 ? `缺${groupMissingCount}集 · ` : ''}{groupItems.length > 1 ? `${groupItems.length}季 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
+          <p className="mt-0.5 text-[10px] text-gray-400">{progress.total > 0 ? `${progress.owned}/${progress.total}集 · ${progress.percent}% · ` : ''}{groupMissingCount > 0 ? `缺${groupMissingCount}集 · ` : ''}{groupItems.length > 1 ? `${groupItems.length}季 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
+          {progress.total > 0 && <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-500" style={{ width: `${progress.percent}%` }} /></div>}
         </div>
       </div>
 
@@ -410,6 +461,7 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">PanSou {pansouCount}</span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">HDHive {hdhiveCount}</span>
                   {groupMissingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {groupMissingCount}</span>}
+                  {progress.total > 0 && <span className="rounded bg-primary-50 px-1.5 py-0.5 text-primary-700">{progress.owned}/{progress.total}集 · {progress.percent}%</span>}
                   {groupLocked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {groupLocked.length}</span>}
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs text-gray-500">{item.overview || item.lastMessage || '点下方按钮搜索资源，支持转存 115、HDHive 解锁和 MoviePilot 下载。'}</p>
@@ -437,6 +489,13 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
             )}
 
             <div className="px-4 py-3 border-b border-gray-100">
+              {progress.total > 0 && (
+                <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-gray-600"><span>媒体库进度</span><span>{progress.owned}/{progress.total} 集 · {progress.percent}%</span></div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-primary-500" style={{ width: `${progress.percent}%` }} /></div>
+                  {progress.episodes.length > 0 && <div className="mt-2 flex flex-wrap gap-1">{progress.episodes.slice(0, 24).map(ep => <span key={ep.id || `${ep.season}-${ep.episode}`} className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-600">{ep.code || `S${String(ep.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')}`}{ep.episodeName ? ` · ${ep.episodeName}` : ''}</span>)}</div>}
+                </div>
+              )}
               {activeSource === 'mp' && <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50"><Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : '重新 MP 搜索'}</button>}
               {activeSource === 'hdhive' && <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex w-full items-center justify-center gap-1.5 rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50"><Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : '重新 HDHive 搜索'}</button>}
               {activeSource === 'pan' && <button type="button" onClick={doPanSearch} disabled={!!search?.loading} className="btn-primary flex w-full items-center justify-center gap-1.5 text-sm disabled:opacity-50"><Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '重新盘搜搜索'}</button>}
@@ -476,7 +535,10 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
 
             <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
               <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}{item.autoTransfer ? ' · 自动转存' : ''}</p>
-              <button onClick={() => onRemove(groupItems.map(current => current.id))} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
+              <div className="flex items-center gap-2">
+                <button onClick={archive} className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs font-semibold text-gray-500 hover:bg-gray-50"><Archive className="h-3.5 w-3.5" /> 归档</button>
+                <button onClick={() => onRemove(groupItems.map(current => current.id))} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
+              </div>
             </div>
           </div>
         </div>

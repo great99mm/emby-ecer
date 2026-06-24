@@ -24,10 +24,12 @@ import (
 const defaultHDHiveURL = "https://hdhive.com"
 
 var (
-	subRunMu        sync.Mutex
-	subRunActive    bool
-	subLastRunAt    time.Time
-	hdhiveUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+	subRunMu              sync.Mutex
+	subRunActive          bool
+	subLastRunAt          time.Time
+	hdhiveCheckinMu       sync.Mutex
+	hdhiveLastCheckinDate string
+	hdhiveUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 )
 
 type subscription struct {
@@ -48,6 +50,8 @@ type subscription struct {
 	LastStatus   string             `json:"lastStatus,omitempty"`
 	LastMessage  string             `json:"lastMessage,omitempty"`
 	LastResults  []normalizedResult `json:"lastResults,omitempty"`
+	Archived     bool               `json:"archived,omitempty"`
+	ArchivedAt   string             `json:"archivedAt,omitempty"`
 }
 
 type subscriptionStore struct {
@@ -93,6 +97,16 @@ type hdhiveResource struct {
 	CreatedAt    string
 }
 
+type hdhiveCheckinResult struct {
+	OK           bool           `json:"ok"`
+	Status       string         `json:"status"`
+	Message      string         `json:"message"`
+	PointsEarned int            `json:"pointsEarned"`
+	Points       int            `json:"points,omitempty"`
+	CheckedIn    *bool          `json:"checkedIn,omitempty"`
+	Raw          map[string]any `json:"raw,omitempty"`
+}
+
 func newSubscriptionStore(path string) *subscriptionStore {
 	store := &subscriptionStore{path: path, items: map[string]subscription{}}
 	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
@@ -120,6 +134,9 @@ func (s *subscriptionStore) List() []subscription {
 	defer s.mu.RUnlock()
 	items := make([]subscription, 0, len(s.items))
 	for _, item := range s.items {
+		if item.Archived {
+			continue
+		}
 		items = append(items, item)
 	}
 	sort.Slice(items, func(left, right int) bool {
@@ -169,6 +186,7 @@ func normalizeSubscription(item subscription) subscription {
 	item.PosterPath = strings.TrimSpace(item.PosterPath)
 	item.Overview = strings.TrimSpace(item.Overview)
 	item.TargetCID = strings.TrimSpace(item.TargetCID)
+	item.ArchivedAt = strings.TrimSpace(item.ArchivedAt)
 	if item.MediaType == "movie" {
 		item.Season = 0
 	}
@@ -225,6 +243,10 @@ func mergeSubscription(existing, incoming subscription) subscription {
 	merged.AutoTransfer = incoming.AutoTransfer || existing.AutoTransfer
 	merged.TargetCID = firstNonEmpty(incoming.TargetCID, existing.TargetCID, "0")
 	merged.UpdatedAt = firstNonEmpty(incoming.UpdatedAt, existing.UpdatedAt)
+	if !existing.Archived || incoming.Archived {
+		merged.Archived = incoming.Archived
+		merged.ArchivedAt = incoming.ArchivedAt
+	}
 	return normalizeSubscription(merged)
 }
 
@@ -236,6 +258,41 @@ func (s *subscriptionStore) Delete(ids []string) error {
 	err := s.persistLocked()
 	s.mu.Unlock()
 	return err
+}
+
+func (s *subscriptionStore) Archive(ids []string, archived bool) ([]subscription, error) {
+	now := time.Now().Format(time.RFC3339)
+	s.mu.Lock()
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		item, ok := s.items[id]
+		if !ok {
+			continue
+		}
+		item.Archived = archived
+		item.ArchivedAt = ""
+		if archived {
+			item.ArchivedAt = now
+			item.Enabled = false
+		}
+		item.UpdatedAt = now
+		s.items[id] = item
+	}
+	err := s.persistLocked()
+	items := make([]subscription, 0, len(s.items))
+	for _, item := range s.items {
+		if !item.Archived {
+			items = append(items, item)
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(items, func(left, right int) bool {
+		return strings.ToLower(items[left].Title) < strings.ToLower(items[right].Title)
+	})
+	return items, err
 }
 
 func (s *subscriptionStore) UpdateResult(id string, results []normalizedResult, status, message string) {
@@ -446,6 +503,27 @@ func handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": subStore.List()})
 }
 
+func handleArchiveSubscriptions(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs      []string `json:"ids"`
+		Archived *bool    `json:"archived"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	archived := true
+	if body.Archived != nil {
+		archived = *body.Archived
+	}
+	items, err := subStore.Archive(body.IDs, archived)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+}
+
 func handleRunSubscriptions(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs []string `json:"ids"`
@@ -506,6 +584,19 @@ func handleHDHiveLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": user, "settings": maskSettings(store.Get())})
+}
+
+func handleHDHiveCheckin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Gamble bool `json:"gamble"`
+	}
+	_ = readJSON(r, &body)
+	result, err := runHDHiveCheckin(store.Get(), body.Gamble)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func handleHDHiveUnlock(w http.ResponseWriter, r *http.Request) {
@@ -771,6 +862,52 @@ func refreshHDHiveLogin(s settings) (*hdhiveClient, error) {
 	return client, nil
 }
 
+func runHDHiveCheckin(s settings, gamble bool) (hdhiveCheckinResult, error) {
+	client, err := newAuthenticatedHDHiveClient(s)
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	result, err := client.Checkin(gamble)
+	if err != nil && isHDHiveTokenError(err) && hasHDHiveCredentials(s) {
+		refreshedClient, refreshErr := refreshHDHiveLogin(s)
+		if refreshErr != nil {
+			return hdhiveCheckinResult{}, fmt.Errorf("HDHive token 失效，自动登录失败：%w", refreshErr)
+		}
+		client = refreshedClient
+		result, err = client.Checkin(gamble)
+	}
+	syncHDHiveCookie(client)
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	return result, nil
+}
+
+func runDailyHDHiveCheckin(s settings) {
+	if err := requireHDHiveAuth(s); err != nil {
+		return
+	}
+	today := time.Now().Format("2006-01-02")
+	hdhiveCheckinMu.Lock()
+	if hdhiveLastCheckinDate == today {
+		hdhiveCheckinMu.Unlock()
+		return
+	}
+	hdhiveLastCheckinDate = today
+	hdhiveCheckinMu.Unlock()
+	result, err := runHDHiveCheckin(s, false)
+	if err != nil {
+		hdhiveCheckinMu.Lock()
+		if hdhiveLastCheckinDate == today {
+			hdhiveLastCheckinDate = ""
+		}
+		hdhiveCheckinMu.Unlock()
+		log.Printf("HDHive daily check-in failed: %v", err)
+		return
+	}
+	log.Printf("HDHive daily check-in: %s, points earned: %d", result.Message, result.PointsEarned)
+}
+
 func hasHDHiveCredentials(s settings) bool {
 	return strings.TrimSpace(s.HDHiveUsername) != "" && strings.TrimSpace(s.HDHivePassword) != ""
 }
@@ -825,6 +962,46 @@ func (c *hdhiveClient) Login(username, password string) (map[string]any, error) 
 		return nil, errors.New("HDHive 登录失败：" + message)
 	}
 	return nil, errors.New("HDHive 登录失败，未获取到用户信息")
+}
+
+func (c *hdhiveClient) Checkin(gamble bool) (hdhiveCheckinResult, error) {
+	body := map[string]any{}
+	if gamble {
+		body["is_gambler"] = true
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/checkin", bytes.NewReader(raw))
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	c.setHeaders(req, "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	defer resp.Body.Close()
+	respRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if resp.StatusCode >= 400 {
+		return hdhiveCheckinResult{}, fmt.Errorf("HDHive 签到失败：HTTP %d %s", resp.StatusCode, shortBody(respRaw))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(respRaw, &payload); err != nil {
+		return hdhiveCheckinResult{}, err
+	}
+	data, _ := payload["data"].(map[string]any)
+	checkedIn := optionalBool(firstNonNil(data["checked_in"], data["checkedIn"], payload["checked_in"], payload["checkedIn"]))
+	message := firstNonEmpty(anyToString(payload["message"]), anyToString(data["message"]))
+	pointsEarned := firstInt(data["points_earned"], data["pointsEarned"], data["earned"], data["change"], payload["points_earned"], payload["pointsEarned"])
+	points := firstInt(data["total_points"], data["totalPoints"], data["balance"], payload["points"])
+	status := "success"
+	if strings.Contains(message, "已") || strings.Contains(strings.ToLower(message), "already") {
+		status = "already_checked"
+	}
+	if message == "" {
+		message = "HDHive 签到完成"
+	}
+	return hdhiveCheckinResult{OK: true, Status: status, Message: message, PointsEarned: pointsEarned, Points: points, CheckedIn: checkedIn, Raw: payload}, nil
 }
 
 func (c *hdhiveClient) Search(keyword, mediaType string, tmdbID int) ([]hdhiveResource, error) {
@@ -1530,6 +1707,7 @@ func startSubscriptionScheduler() {
 		defer ticker.Stop()
 		for range ticker.C {
 			s := store.Get()
+			go runDailyHDHiveCheckin(s)
 			if !s.SubEnabled || subscriptionRunIsActive() {
 				continue
 			}
@@ -1555,7 +1733,7 @@ func selectSubscriptions(items []subscription, ids []string) []subscription {
 	}
 	selected := make([]subscription, 0)
 	for _, item := range items {
-		if !item.Enabled {
+		if !item.Enabled || item.Archived {
 			continue
 		}
 		if len(set) > 0 && !set[item.ID] {
@@ -1660,6 +1838,67 @@ func firstErr(primary error, fallbackErr error) error {
 		return primary
 	}
 	return fallbackErr
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func optionalBool(value any) *bool {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case bool:
+		return &v
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		parsed := parseBool(v)
+		return &parsed
+	default:
+		text := strings.TrimSpace(fmt.Sprint(v))
+		if text == "" || strings.EqualFold(text, "null") {
+			return nil
+		}
+		parsed := parseBool(text)
+		return &parsed
+	}
+}
+
+func firstInt(values ...any) int {
+	for _, value := range values {
+		switch v := value.(type) {
+		case nil:
+			continue
+		case int:
+			if v != 0 {
+				return v
+			}
+		case int64:
+			if v != 0 {
+				return int(v)
+			}
+		case float64:
+			if v != 0 {
+				return int(v)
+			}
+		case json.Number:
+			if n, err := v.Int64(); err == nil && n != 0 {
+				return int(n)
+			}
+		case string:
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n != 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func parseBool(value string) bool {

@@ -401,6 +401,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 	case r.URL.Path == "/api/hdhive/login" && r.Method == http.MethodPost:
 		handleHDHiveLogin(w, r)
 
+	case r.URL.Path == "/api/hdhive/checkin" && r.Method == http.MethodPost:
+		handleHDHiveCheckin(w, r)
+
 	case r.URL.Path == "/api/hdhive/unlock" && r.Method == http.MethodPost:
 		handleHDHiveUnlock(w, r)
 
@@ -412,6 +415,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/subscriptions/delete" && r.Method == http.MethodPost:
 		handleDeleteSubscription(w, r)
+
+	case r.URL.Path == "/api/subscriptions/archive" && r.Method == http.MethodPost:
+		handleArchiveSubscriptions(w, r)
 
 	case r.URL.Path == "/api/subscriptions/run" && r.Method == http.MethodPost:
 		handleRunSubscriptions(w, r)
