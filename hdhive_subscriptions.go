@@ -242,6 +242,115 @@ func handleSaveSubscription(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, saved)
 }
 
+func handleSubscriptionWebhook(w http.ResponseWriter, r *http.Request) {
+	s := store.Get()
+	if strings.TrimSpace(s.SubWebhookToken) == "" {
+		writeError(w, http.StatusForbidden, errors.New("订阅 Webhook Token 未配置"))
+		return
+	}
+	if !validSubscriptionWebhookToken(r, s.SubWebhookToken) {
+		writeError(w, http.StatusUnauthorized, errors.New("订阅 Webhook 鉴权失败"))
+		return
+	}
+	var body struct {
+		Title     string `json:"title"`
+		Name      string `json:"name"`
+		TMDBID    int    `json:"tmdbId"`
+		MediaType string `json:"mediaType"`
+		Type      string `json:"type"`
+		Season    int    `json:"season"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	mediaType := normalizeHDHiveMediaType(firstNonEmpty(body.MediaType, body.Type))
+	if mediaType != "tv" && mediaType != "movie" {
+		writeError(w, http.StatusBadRequest, errors.New("mediaType 仅支持 tv 或 movie"))
+		return
+	}
+	title := firstNonEmpty(body.Title, body.Name)
+	if strings.TrimSpace(title) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("缺少 title/name"))
+		return
+	}
+	item := subscription{
+		Title:        title,
+		MediaType:    mediaType,
+		TMDBID:       body.TMDBID,
+		Season:       body.Season,
+		Enabled:      true,
+		AutoTransfer: false,
+		TargetCID:    "0",
+	}
+	if mediaType == "movie" {
+		item.Season = 0
+	}
+	if item.TMDBID > 0 {
+		applySubscriptionTMDBMetadata(s, &item)
+	}
+	saved, err := subStore.Save(item)
+	if err != nil {
+		writeError(w, statusFromError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": saved})
+}
+
+func validSubscriptionWebhookToken(r *http.Request, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false
+	}
+	candidates := []string{
+		strings.TrimSpace(r.Header.Get("X-Webhook-Token")),
+		strings.TrimSpace(r.URL.Query().Get("token")),
+	}
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); auth != "" {
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			candidates = append(candidates, strings.TrimSpace(auth[7:]))
+		} else {
+			candidates = append(candidates, auth)
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func applySubscriptionTMDBMetadata(s settings, item *subscription) {
+	if item == nil || strings.TrimSpace(s.TMDBAPIKey) == "" || item.TMDBID <= 0 {
+		return
+	}
+	if item.MediaType == "movie" {
+		var movie struct {
+			Title         string `json:"title"`
+			OriginalTitle string `json:"original_title"`
+			ReleaseDate   string `json:"release_date"`
+			PosterPath    string `json:"poster_path"`
+			Overview      string `json:"overview"`
+		}
+		if err := tmdbGet(s, fmt.Sprintf("/movie/%d", item.TMDBID), map[string]string{"language": "zh-CN"}, &movie); err == nil {
+			item.Title = firstNonEmpty(movie.Title, movie.OriginalTitle, item.Title)
+			item.TMDBYear = firstYear(movie.ReleaseDate)
+			item.PosterPath = movie.PosterPath
+			item.Overview = movie.Overview
+		}
+		return
+	}
+	var tv tmdbTVDetail
+	if err := tmdbGet(s, fmt.Sprintf("/tv/%d", item.TMDBID), map[string]string{"language": "zh-CN"}, &tv); err != nil {
+		return
+	}
+	item.Title = firstNonEmpty(tv.Name, tv.OriginalName, item.Title)
+	item.TMDBYear = firstYear(tv.FirstAirDate)
+	item.PosterPath = tv.PosterPath
+	item.Overview = tv.Overview
+}
+
 func handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs []string `json:"ids"`

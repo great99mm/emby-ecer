@@ -246,6 +246,7 @@ type settings struct {
 	SubEnabled      bool   `json:"subEnabled"`
 	SubInterval     int    `json:"subInterval"`
 	SubAutoTransfer bool   `json:"subAutoTransfer"`
+	SubWebhookToken string `json:"subWebhookToken"`
 	OpenAIBaseURL   string `json:"openaiBaseUrl"`
 	OpenAIAPIKey    string `json:"openaiApiKey"`
 	OpenAIModel     string `json:"openaiModel"`
@@ -334,6 +335,10 @@ func route(w http.ResponseWriter, r *http.Request) {
 
 	if path == "/api/auth/login" && r.Method == http.MethodPost {
 		handleLogin(w, r)
+		return
+	}
+	if path == "/api/subscriptions/webhook" && r.Method == http.MethodPost {
+		handleSubscriptionWebhook(w, r)
 		return
 	}
 
@@ -559,6 +564,7 @@ func settingsFromEnv() settings {
 		SubEnabled:      getenvBool("SUBSCRIPTION_ENABLED", false),
 		SubInterval:     getenvInt("SUBSCRIPTION_INTERVAL_HOURS", 6),
 		SubAutoTransfer: getenvBool("SUBSCRIPTION_AUTO_TRANSFER", false),
+		SubWebhookToken: os.Getenv("SUBSCRIPTION_WEBHOOK_TOKEN"),
 		OpenAIBaseURL:   getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
 		OpenAIModel:     getenv("OPENAI_MODEL", "gpt-4o-mini"),
@@ -632,6 +638,7 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	setPlain("subEnabled", func(v string) { next.SubEnabled = parseBool(v) })
 	setPlain("subInterval", func(v string) { next.SubInterval = clampIntervalHours(parseInt(v)) })
 	setPlain("subAutoTransfer", func(v string) { next.SubAutoTransfer = parseBool(v) })
+	setSecret("subWebhookToken", func(v string) { next.SubWebhookToken = v })
 	setPlain("openaiBaseUrl", func(v string) {
 		if v == "" {
 			v = "https://api.openai.com/v1"
@@ -736,17 +743,19 @@ func maskSettings(s settings) map[string]any {
 		"subEnabled":      s.SubEnabled,
 		"subInterval":     clampIntervalHours(s.SubInterval),
 		"subAutoTransfer": s.SubAutoTransfer,
+		"subWebhookToken": maskSecret(s.SubWebhookToken, 4),
 		"openaiBaseUrl":   fallback(s.OpenAIBaseURL, "https://api.openai.com/v1"),
 		"openaiApiKey":    maskSecret(s.OpenAIAPIKey, 4),
 		"openaiModel":     fallback(s.OpenAIModel, "gpt-4o-mini"),
 		"ready": map[string]bool{
-			"emby":   s.EmbyURL != "" && s.EmbyAPIKey != "",
-			"tmdb":   s.TMDBAPIKey != "",
-			"pansou": s.PansouURL != "",
-			"p115":   s.P115Cookie != "",
-			"mp":     s.MPUrl != "" && s.MPToken != "",
-			"hdhive": s.HDHiveURL != "" && (s.HDHiveCookie != "" || s.HDHiveUsername != "" && s.HDHivePassword != ""),
-			"llm":    s.OpenAIBaseURL != "" && s.OpenAIAPIKey != "" && s.OpenAIModel != "",
+			"emby":       s.EmbyURL != "" && s.EmbyAPIKey != "",
+			"tmdb":       s.TMDBAPIKey != "",
+			"pansou":     s.PansouURL != "",
+			"p115":       s.P115Cookie != "",
+			"mp":         s.MPUrl != "" && s.MPToken != "",
+			"hdhive":     s.HDHiveURL != "" && (s.HDHiveCookie != "" || s.HDHiveUsername != "" && s.HDHivePassword != ""),
+			"llm":        s.OpenAIBaseURL != "" && s.OpenAIAPIKey != "" && s.OpenAIModel != "",
+			"subWebhook": s.SubWebhookToken != "",
 		},
 	}
 }
@@ -1190,6 +1199,7 @@ type tmdbTVDetail struct {
 	Name         string       `json:"name"`
 	OriginalName string       `json:"original_name"`
 	FirstAirDate string       `json:"first_air_date"`
+	Overview     string       `json:"overview"`
 	PosterPath   string       `json:"poster_path"`
 	Seasons      []tmdbSeason `json:"seasons"`
 }

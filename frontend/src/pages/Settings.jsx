@@ -193,6 +193,7 @@ export default function Settings() {
         <Checkbox name="subEnabled" label="启用订阅自动扫描" checked={get('subEnabled') === true || get('subEnabled') === 'true'} onChange={e => update('subEnabled', e.target.checked)} />
         <Checkbox name="subAutoTransfer" label="订阅命中后自动转存 115" checked={get('subAutoTransfer') === true || get('subAutoTransfer') === 'true'} onChange={e => update('subAutoTransfer', e.target.checked)} />
         <Input name="subInterval" label="自动扫描间隔（小时）" value={get('subInterval')} onChange={e => update('subInterval', e.target.value)} type="number" placeholder="默认 6，最大 168" />
+        <Input name="subWebhookToken" label="订阅 Webhook Token" value={get('subWebhookToken')} onChange={e => update('subWebhookToken', e.target.value)} type="password" placeholder="外部 AI 调用订阅 webhook 的鉴权 token" />
       </AuthSection>
 
       <AuthSection title="大模型识别" icon={sectionIcons['大模型识别']} ready={ready.llm} onTest={testConnection} target="llm">
