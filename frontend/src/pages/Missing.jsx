@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, Trash2, CheckSquare, Square, ShieldCheck, X } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, CheckSquare, Square, ShieldCheck, X } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -59,9 +59,9 @@ export default function Missing() {
   const totalOwned = groupList.reduce((s, g) => s + g.ownedEpisodes, 0);
   const healthPct = totalTMDB > 0 ? Math.round((totalOwned / totalTMDB) * 100) : 0;
 
-  const startScan = async (recentOnly = false, clearCache = false) => {
+  const startScan = async (recentOnly = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly, clearCache }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly }) });
       setActiveJobId(data.jobId);
       setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
     } catch (err) {
@@ -170,17 +170,9 @@ export default function Missing() {
           <Inbox className="w-10 h-10 text-gray-300 mx-auto mb-3" />
           <h2 className="text-lg font-bold text-gray-900">暂无缺失列表</h2>
           <p className="mt-1 text-sm text-gray-500">请先扫描 Emby 媒体库</p>
-          <button onClick={() => startScan(false, false)} disabled={busy} className="btn-primary mt-4 mx-auto flex items-center gap-2">
+          <button onClick={() => startScan(false)} disabled={busy} className="btn-primary mt-4 mx-auto flex items-center gap-2">
             <Radar className="w-4 h-4" /> 扫描媒体库
           </button>
-          <details className="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-left">
-            <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
-            <div className="mt-3 grid grid-cols-1 gap-3">
-              <button type="button" onClick={() => startScan(false, true)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2 text-red-600 border-red-200 hover:bg-red-50">
-                <Trash2 className="w-4 h-4" /> 清空 TMDB 缓存后扫描
-              </button>
-            </div>
-          </details>
         </div>
       </div>
     );
@@ -213,17 +205,9 @@ export default function Missing() {
       </div>
 
       {/* Scan Button */}
-      <button onClick={() => startScan(false, false)} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2">
+      <button onClick={() => startScan(false)} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2">
         <Radar className="w-4 h-4" /> 全量扫描
       </button>
-      <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-        <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
-        <div className="mt-3 grid grid-cols-1 gap-3">
-          <button type="button" onClick={() => startScan(false, true)} disabled={busy} className="btn-outline w-full flex items-center justify-center gap-2 text-red-600 border-red-200 hover:bg-red-50">
-            <Trash2 className="w-4 h-4" /> 清空 TMDB 缓存后扫描
-          </button>
-        </div>
-      </details>
 
       <div onClick={() => openExemptionModal('manual')} className="card cursor-pointer space-y-4 transition-shadow hover:shadow-md">
         <div className="flex items-center justify-between gap-3">
@@ -299,7 +283,7 @@ export default function Missing() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
-            <p className="mt-1 text-xs text-gray-400">帮助确认哪些剧集命中缓存、真正重扫、未匹配，和为什么被跳过。</p>
+            <p className="mt-1 text-xs text-gray-400">帮助确认哪些剧集真正重扫、未匹配，和为什么被跳过。</p>
           </div>
           <Activity className="h-5 w-5 text-gray-400" />
         </div>
@@ -307,8 +291,8 @@ export default function Missing() {
         <div className="mt-4 space-y-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">命中缓存</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.cacheHits ?? summary.seriesCached ?? 0}</div>
+            <div className="text-xs font-bold text-gray-500">对比剧集</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.comparedSeries ?? comparedSeries.length ?? 0}</div>
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
             <div className="text-xs font-bold text-gray-500">真正重扫</div>

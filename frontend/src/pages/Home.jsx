@@ -2,7 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, RefreshCw, Trash2, Activity } from 'lucide-react';
+import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, RefreshCw, Activity } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
 
@@ -22,9 +22,9 @@ export default function Home() {
   const scannedAt = scan?.scannedAt;
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
-  const startJob = async (type, recentOnly = false, clearCache = false) => {
+  const startJob = async (type, recentOnly = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly, clearCache }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly }) });
       setActiveJobId(data.jobId);
       setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
     } catch (err) {
@@ -87,27 +87,13 @@ export default function Home() {
             <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}{summary.scanMode === 'recent' ? ' · 最近变更模式' : summary.scanMode === 'full' ? ' · 全量增量模式' : ''}</span>
           </div>
           <button
-            onClick={() => startJob('scan', false, false)}
+            onClick={() => startJob('scan', false)}
             disabled={busy}
             className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
           >
             <Radar className="w-4 h-4" />
             全量扫描
           </button>
-          <details className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">高级选项</summary>
-            <div className="mt-3 grid grid-cols-1 gap-3">
-              <button
-                type="button"
-                onClick={() => startJob('scan', false, true)}
-                disabled={busy}
-                className="btn-outline w-full flex items-center justify-center gap-2 text-sm text-red-600 border-red-200 hover:bg-red-50"
-              >
-                <Trash2 className="w-4 h-4" />
-                清空 TMDB 缓存后扫描
-              </button>
-            </div>
-          </details>
         </div>
       </div>
 
@@ -116,7 +102,7 @@ export default function Home() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
-            <p className="mt-1 text-xs text-gray-400">查看缓存命中、真正重扫、未匹配数量，以及被跳过的剧集原因。</p>
+            <p className="mt-1 text-xs text-gray-400">查看重扫、未匹配数量，以及被跳过的剧集原因。</p>
           </div>
           <Activity className="h-5 w-5 text-gray-400" />
         </div>
@@ -124,8 +110,8 @@ export default function Home() {
         <div className="mt-4 space-y-4">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">命中缓存</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.cacheHits ?? summary.seriesCached ?? 0}</div>
+            <div className="text-xs font-bold text-gray-500">对比剧集</div>
+            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.comparedSeries ?? comparedSeries.length ?? 0}</div>
           </div>
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
             <div className="text-xs font-bold text-gray-500">真正重扫</div>

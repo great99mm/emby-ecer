@@ -34,7 +34,6 @@ var (
 	appUsersMu      sync.RWMutex
 	jwtSecret       []byte
 	store           *settingsStore
-	tmdbCache       *tmdbCacheStore
 	seriesScanCache *seriesScanCacheStore
 	activeScanMu    sync.Mutex
 	activeScanJobID string
@@ -258,18 +257,6 @@ type settingsStore struct {
 	data settings
 }
 
-type tmdbCacheEntry struct {
-	ExpiresAt int64           `json:"expiresAt"`
-	Payload   json.RawMessage `json:"payload"`
-}
-
-type tmdbCacheStore struct {
-	mu   sync.RWMutex
-	path string
-	ttl  time.Duration
-	data map[string]tmdbCacheEntry
-}
-
 type seriesScanCacheEntry struct {
 	Fingerprint string           `json:"fingerprint"`
 	Matched     bool             `json:"matched"`
@@ -306,7 +293,6 @@ func main() {
 	}
 
 	store = newSettingsStore(configPath)
-	tmdbCache = newTMDBCacheStore(getenv("TMDB_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "tmdb-cache.json")), time.Duration(getenvInt("TMDB_CACHE_TTL_HOURS", 24))*time.Hour)
 	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
 	jobMgr = newJobManager(getenv("JOB_STATE_PATH", filepath.Join(filepath.Dir(configPath), "jobs.json")))
 	subStore = newSubscriptionStore(getenv("SUBSCRIPTIONS_PATH", filepath.Join(filepath.Dir(configPath), "subscriptions.json")))
@@ -446,15 +432,11 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			AiredOnly  bool     `json:"airedOnly"`
 			MaxSeries  int      `json:"maxSeries"`
 			RecentOnly bool     `json:"recentOnly"`
-			ClearCache bool     `json:"clearCache"`
 			SeriesID   string   `json:"seriesId"`
 			SeriesIDs  []string `json:"seriesIds"`
 		}
 		body.AiredOnly = true
 		_ = readJSON(r, &body)
-		if body.ClearCache {
-			clearTMDBCache()
-		}
 		result, err := scanLibrary(store.Get(), body.AiredOnly, body.MaxSeries, body.RecentOnly, lastScanTime(), joinSeriesIDs(body.SeriesID, body.SeriesIDs), nil)
 		if err != nil {
 			writeError(w, statusFromError(err), err)
@@ -2190,7 +2172,6 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AiredOnly  bool     `json:"airedOnly"`
 		MaxSeries  int      `json:"maxSeries"`
 		RecentOnly bool     `json:"recentOnly"`
-		ClearCache bool     `json:"clearCache"`
 		SeriesID   string   `json:"seriesId"`
 		SeriesIDs  []string `json:"seriesIds"`
 	}
@@ -2217,7 +2198,7 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	j := jobMgr.create(body.Type)
 	activateScanJob(j.ID)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, body.ClearCache, joinSeriesIDs(body.SeriesID, body.SeriesIDs))
+	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, joinSeriesIDs(body.SeriesID, body.SeriesIDs))
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
 }
 
@@ -2320,7 +2301,7 @@ type seriesExemptionInput struct {
 	TMDBYear string `json:"tmdbYear"`
 }
 
-func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, clearCache bool, seriesID string) {
+func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, seriesID string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("runJob panic: %v", r)
@@ -2354,14 +2335,6 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		j.Message = "开始扫描媒体库..."
 		j.Current = modeText
 	})
-	if clearCache {
-		update(func(j *job) {
-			j.Message = "正在清空 TMDB 缓存..."
-			j.Current = "清空 TMDB 缓存"
-		})
-		clearTMDBCache()
-	}
-
 	scanProgressMax := 99
 	searchProgressBase := 60
 	if typ == "scan-search" {
@@ -2694,14 +2667,8 @@ func tmdbGet(s settings, route string, query map[string]string, out any) error {
 	}
 	query["api_key"] = s.TMDBAPIKey
 	endpoint := buildBaseURL("https://api.themoviedb.org/3", route, query)
-	if tmdbCache != nil && tmdbCache.Get(endpoint, out) {
-		return nil
-	}
 	if err := requestJSON(http.MethodGet, endpoint, map[string]string{"Accept": "application/json"}, nil, out, 35*time.Second); err != nil {
 		return err
-	}
-	if tmdbCache != nil {
-		tmdbCache.Set(endpoint, out)
 	}
 	return nil
 }
@@ -3351,15 +3318,6 @@ func shortBody(raw []byte) string {
 	return text
 }
 
-func newTMDBCacheStore(path string, ttl time.Duration) *tmdbCacheStore {
-	store := &tmdbCacheStore{path: path, ttl: ttl, data: map[string]tmdbCacheEntry{}}
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		_ = json.Unmarshal(raw, &store.data)
-	}
-	store.cleanupExpired()
-	return store
-}
-
 func newSeriesScanCacheStore(path string) *seriesScanCacheStore {
 	store := &seriesScanCacheStore{path: path, data: map[string]seriesScanCacheEntry{}}
 	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
@@ -3460,71 +3418,6 @@ func (s *seriesScanCacheStore) Clear() error {
 	return s.flushLocked()
 }
 
-func (s *tmdbCacheStore) Get(key string, out any) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.RLock()
-	entry, ok := s.data[key]
-	s.mu.RUnlock()
-	if !ok || entry.ExpiresAt < time.Now().Unix() {
-		return false
-	}
-	return json.Unmarshal(entry.Payload, out) == nil
-}
-
-func (s *tmdbCacheStore) Set(key string, value any) {
-	if s == nil {
-		return
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return
-	}
-	s.mu.Lock()
-	s.data[key] = tmdbCacheEntry{ExpiresAt: time.Now().Add(s.ttl).Unix(), Payload: raw}
-	s.cleanupExpiredLocked()
-	_ = s.persistLocked()
-	s.mu.Unlock()
-}
-
-func (s *tmdbCacheStore) cleanupExpired() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cleanupExpiredLocked()
-	_ = s.persistLocked()
-}
-
-func (s *tmdbCacheStore) cleanupExpiredLocked() {
-	now := time.Now().Unix()
-	for key, entry := range s.data {
-		if entry.ExpiresAt < now {
-			delete(s.data, key)
-		}
-	}
-}
-
-func (s *tmdbCacheStore) persistLocked() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.path, raw, 0o600)
-}
-
-func (s *tmdbCacheStore) Clear() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data = map[string]tmdbCacheEntry{}
-	return s.persistLocked()
-}
-
 func scanResultPath() string {
 	return getenv("SCAN_RESULT_PATH", filepath.Join(filepath.Dir(getenv("CONFIG_PATH", filepath.Join("data", "config.json"))), "scan-result.json"))
 }
@@ -3540,12 +3433,6 @@ func lastScanTime() time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func clearTMDBCache() {
-	if tmdbCache != nil {
-		_ = tmdbCache.Clear()
-	}
 }
 
 func scanModeLabel(recentOnly bool) string {
