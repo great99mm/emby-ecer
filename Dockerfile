@@ -1,6 +1,6 @@
-FROM golang:1.22-alpine AS gobuilder
+FROM golang:1.25-alpine AS gobuilder
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY *.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/emby-ecer .
 

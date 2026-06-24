@@ -12,7 +12,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -109,22 +108,23 @@ type hdhiveCheckinResult struct {
 
 func newSubscriptionStore(path string) *subscriptionStore {
 	store := &subscriptionStore{path: path, items: map[string]subscription{}}
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		var items []subscription
-		if err := json.Unmarshal(raw, &items); err == nil {
-			for _, item := range items {
-				item = normalizeSubscription(item)
-				if strings.TrimSpace(item.ID) == "" {
-					continue
-				}
-				if existingID, ok := store.findDuplicateIDLocked(item); ok {
-					store.items[existingID] = mergeSubscription(store.items[existingID], item)
-				} else {
-					store.items[item.ID] = item
-				}
+	var items []subscription
+	if stateDB != nil {
+		stateDB.ImportJSONFile("subscriptions", path, &items)
+	}
+	if err := loadStateJSON("subscriptions", path, &items); err == nil {
+		for _, item := range items {
+			item = normalizeSubscription(item)
+			if strings.TrimSpace(item.ID) == "" {
+				continue
 			}
-			_ = store.persistLocked()
+			if existingID, ok := store.findDuplicateIDLocked(item); ok {
+				store.items[existingID] = mergeSubscription(store.items[existingID], item)
+			} else {
+				store.items[item.ID] = item
+			}
 		}
+		_ = store.persistLocked()
 	}
 	return store
 }
@@ -346,19 +346,12 @@ func (s *subscriptionStore) ReplaceUnlockedResult(id, slug string, result normal
 }
 
 func (s *subscriptionStore) persistLocked() error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
 	items := make([]subscription, 0, len(s.items))
 	for _, item := range s.items {
 		items = append(items, item)
 	}
 	sort.Slice(items, func(left, right int) bool { return items[left].CreatedAt < items[right].CreatedAt })
-	raw, err := json.MarshalIndent(items, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.path, raw, 0o600)
+	return saveStateJSON("subscriptions", s.path, items)
 }
 
 func handleListSubscriptions(w http.ResponseWriter, r *http.Request) {

@@ -83,23 +83,24 @@ type persistedJobState struct {
 
 func newJobManager(path string) *jobManager {
 	m := &jobManager{path: path, jobs: map[string]*job{}}
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		var state persistedJobState
-		if err := json.Unmarshal(raw, &state); err == nil {
-			for id, item := range state.Jobs {
-				if item == nil || strings.TrimSpace(id) == "" {
-					continue
-				}
-				cloned := cloneJob(item)
-				if cloned.Status == jobRunning || cloned.Status == jobPending {
-					cloned.Status = jobError
-					cloned.Error = "服务重启，任务已中断"
-					cloned.Message = "服务重启，任务已中断"
-					cloned.Current = "已中断"
-					cloned.UpdatedAt = time.Now()
-				}
-				m.jobs[id] = cloned
+	var state persistedJobState
+	if stateDB != nil {
+		stateDB.ImportJSONFile("jobs", path, &state)
+	}
+	if err := loadStateJSON("jobs", path, &state); err == nil {
+		for id, item := range state.Jobs {
+			if item == nil || strings.TrimSpace(id) == "" {
+				continue
 			}
+			cloned := cloneJob(item)
+			if cloned.Status == jobRunning || cloned.Status == jobPending {
+				cloned.Status = jobError
+				cloned.Error = "服务重启，任务已中断"
+				cloned.Message = "服务重启，任务已中断"
+				cloned.Current = "已中断"
+				cloned.UpdatedAt = time.Now()
+			}
+			m.jobs[id] = cloned
 		}
 	}
 	m.cleanupLocked()
@@ -156,9 +157,6 @@ func (m *jobManager) persistLocked() error {
 	if m == nil || strings.TrimSpace(m.path) == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
-		return err
-	}
 	state := persistedJobState{Jobs: map[string]*job{}}
 	for id, item := range m.jobs {
 		if item == nil {
@@ -166,11 +164,7 @@ func (m *jobManager) persistLocked() error {
 		}
 		state.Jobs[id] = cloneJob(item)
 	}
-	raw, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(m.path, raw, 0o600)
+	return saveStateJSON("jobs", m.path, state)
 }
 
 func cloneJob(in *job) *job {
@@ -281,6 +275,11 @@ type seriesScanCacheStore struct {
 
 func main() {
 	configPath := getenv("CONFIG_PATH", filepath.Join("data", "config.json"))
+	var err error
+	stateDB, err = initSQLiteState(sqlitePathFromConfig(configPath))
+	if err != nil {
+		log.Fatal(err)
+	}
 	// 先从持久化文件加载账号密码，没有则用环境变量
 	usersPath := filepath.Join(filepath.Dir(configPath), "users.json")
 	appUsers = loadUsers(usersPath)
@@ -532,11 +531,12 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 func newSettingsStore(path string) *settingsStore {
 	data := settingsFromEnv()
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		var saved settings
-		if err := json.Unmarshal(raw, &saved); err == nil {
-			data = saved
-		}
+	var saved settings
+	if stateDB != nil {
+		stateDB.ImportJSONFile("settings", path, &saved)
+	}
+	if err := loadStateJSON("settings", path, &saved); err == nil {
+		data = saved
 	}
 	if strings.TrimSpace(data.PansouURL) == "" {
 		data.PansouURL = defaultPanSouURL
@@ -673,11 +673,7 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	next.ScanConcurrency = clampScanConcurrency(next.ScanConcurrency)
 
 	s.data = next
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return next, err
-	}
-	raw, _ := json.MarshalIndent(next, "", "  ")
-	return next, os.WriteFile(s.path, raw, 0o600)
+	return next, saveStateJSON("settings", s.path, next)
 }
 
 func (s *settingsStore) UpdateHDHiveCookie(cookie string) error {
@@ -691,11 +687,7 @@ func (s *settingsStore) UpdateHDHiveCookie(cookie string) error {
 		return nil
 	}
 	s.data.HDHiveCookie = cookie
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	raw, _ := json.MarshalIndent(s.data, "", "  ")
-	return os.WriteFile(s.path, raw, 0o600)
+	return saveStateJSON("settings", s.path, s.data)
 }
 
 func (s *settingsStore) UpdateHDHiveAuth(username, password, cookie string) error {
@@ -720,11 +712,7 @@ func (s *settingsStore) UpdateHDHiveAuth(username, password, cookie string) erro
 	if !changed {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	raw, _ := json.MarshalIndent(s.data, "", "  ")
-	return os.WriteFile(s.path, raw, 0o600)
+	return saveStateJSON("settings", s.path, s.data)
 }
 
 func maskSettings(s settings) map[string]any {
@@ -828,12 +816,9 @@ func handleChangePassword(w http.ResponseWriter, r *http.Request, username strin
 		return
 	}
 	appUsers[username] = body.NewPassword
-	// 持久化到文件
 	configPath := getenv("CONFIG_PATH", filepath.Join("data", "config.json"))
 	usersPath := filepath.Join(filepath.Dir(configPath), "users.json")
-	_ = os.MkdirAll(filepath.Dir(usersPath), 0o755)
-	raw, _ := json.MarshalIndent(appUsers, "", "  ")
-	_ = os.WriteFile(usersPath, raw, 0o600)
+	_ = saveStateJSON("users", usersPath, appUsers)
 	writeJSON(w, http.StatusOK, map[string]any{"message": "密码已修改"})
 }
 
@@ -2909,12 +2894,11 @@ func parseUsers(value string) map[string]string {
 }
 
 func loadUsers(path string) map[string]string {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
 	var users map[string]string
-	if err := json.Unmarshal(raw, &users); err != nil {
+	if stateDB != nil {
+		stateDB.ImportJSONFile("users", path, &users)
+	}
+	if err := loadStateJSON("users", path, &users); err != nil {
 		return nil
 	}
 	return users
@@ -3336,8 +3320,11 @@ func shortBody(raw []byte) string {
 
 func newSeriesScanCacheStore(path string) *seriesScanCacheStore {
 	store := &seriesScanCacheStore{path: path, data: map[string]seriesScanCacheEntry{}}
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		_ = json.Unmarshal(raw, &store.data)
+	if stateDB != nil {
+		stateDB.ImportJSONFile("series_scan_cache", path, &store.data)
+	}
+	if err := loadStateJSON("series_scan_cache", path, &store.data); err != nil {
+		store.data = map[string]seriesScanCacheEntry{}
 	}
 	return store
 }
@@ -3409,14 +3396,7 @@ func (s *seriesScanCacheStore) flushLocked() error {
 	if !s.dirty {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(s.path, raw, 0o600); err != nil {
+	if err := saveStateJSON("series_scan_cache", s.path, s.data); err != nil {
 		return err
 	}
 	s.dirty = false
@@ -3485,14 +3465,7 @@ func parseFlexibleTime(value string) time.Time {
 
 func saveScanResult(result map[string]any) error {
 	path := scanResultPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, 0o600)
+	return saveStateJSON("scan_result", path, result)
 }
 
 func mergeSingleSeriesScanResult(seriesID string, fresh map[string]any) map[string]any {
@@ -3647,12 +3620,11 @@ func parseSeriesIDSet(value string) map[string]bool {
 
 func loadScanResult() (map[string]any, error) {
 	path := scanResultPath()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	var result map[string]any
-	if err := json.Unmarshal(raw, &result); err != nil {
+	if stateDB != nil {
+		stateDB.ImportJSONFile("scan_result", path, &result)
+	}
+	if err := loadStateJSON("scan_result", path, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -3664,24 +3636,16 @@ func searchResultsPath() string {
 
 func saveSearchResults(searched any) error {
 	path := searchResultsPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(searched, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, 0o600)
+	return saveStateJSON("search_results", path, searched)
 }
 
 func loadSearchResults() ([]any, error) {
 	path := searchResultsPath()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	var results []any
-	if err := json.Unmarshal(raw, &results); err != nil {
+	if stateDB != nil {
+		stateDB.ImportJSONFile("search_results", path, &results)
+	}
+	if err := loadStateJSON("search_results", path, &results); err != nil {
 		return nil, err
 	}
 	return results, nil
