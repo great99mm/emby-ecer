@@ -22,9 +22,10 @@ export default function Subscriptions() {
   const [tmdbResults, setTmdbResults] = useState([]);
   const [selectedTMDB, setSelectedTMDB] = useState(null);
 
-  const enabledCount = items.filter(item => item.enabled).length;
-  const lockedCount = items.reduce((sum, item) => sum + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0);
-  const resultCount = items.reduce((sum, item) => sum + (item.lastResults || []).length, 0);
+  const groupedItems = groupSubscriptions(items);
+  const enabledCount = groupedItems.filter(group => (group.items || []).some(item => item.enabled)).length;
+  const lockedCount = groupedItems.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0), 0);
+  const resultCount = groupedItems.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).length, 0), 0);
   const missingBySubscription = buildSubscriptionMissingMap(missing);
 
   const load = async () => {
@@ -104,9 +105,10 @@ export default function Subscriptions() {
   };
 
   const remove = async (id) => {
-    if (!window.confirm('确认删除这个订阅？')) return;
+    const ids = Array.isArray(id) ? id : [id];
+    if (!window.confirm(ids.length > 1 ? `确认删除这 ${ids.length} 个季的订阅？` : '确认删除这个订阅？')) return;
     try {
-      const data = await api('/api/subscriptions/delete', { method: 'POST', body: JSON.stringify({ ids: [id] }) });
+      const data = await api('/api/subscriptions/delete', { method: 'POST', body: JSON.stringify({ ids }) });
       setItems(data.items || []);
       toast.success('已删除');
     } catch (err) {
@@ -132,11 +134,11 @@ export default function Subscriptions() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
-        <StatCard label="订阅" value={items.length} icon={Timer} />
+        <StatCard label="订阅" value={groupedItems.length} icon={Timer} />
         <StatCard label="启用中" value={enabledCount} icon={CheckCircle2} />
         <StatCard label="候选资源" value={resultCount} icon={Search} />
         <StatCard label="待审批" value={lockedCount} icon={Unlock} accent />
-        <StatCard label="自动转存" value={items.filter(item => item.autoTransfer).length} icon={Download} />
+        <StatCard label="自动转存" value={groupedItems.filter(group => (group.items || []).some(item => item.autoTransfer)).length} icon={Download} />
       </div>
 
       <div className="card overflow-hidden p-0">
@@ -227,8 +229,8 @@ export default function Subscriptions() {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-        {items.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : items.map(item => (
-          <SubscriptionCard key={item.id} item={item} missingCount={subscriptionMissingCount(item, missingBySubscription)} running={running} onRun={run} onRemove={remove} onReload={load} />
+        {groupedItems.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : groupedItems.map(item => (
+          <SubscriptionCard key={item.id} item={item} missingMap={missingBySubscription} running={running} onRun={run} onRemove={remove} onReload={load} />
         ))}
       </div>
 
@@ -249,13 +251,42 @@ function buildSubscriptionMissingMap(missing) {
   return out;
 }
 
+function groupSubscriptions(items) {
+  const groups = new Map();
+  for (const item of items || []) {
+    const key = `${item.mediaType || 'tv'}:${item.tmdbId || item.title}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.items.push(item);
+      existing.lastResults = [...(existing.lastResults || []), ...(item.lastResults || [])];
+      existing.enabled = existing.enabled || item.enabled;
+      existing.autoTransfer = existing.autoTransfer || item.autoTransfer;
+      if (!existing.lastRunAt || (item.lastRunAt && item.lastRunAt > existing.lastRunAt)) {
+        existing.lastRunAt = item.lastRunAt;
+        existing.lastMessage = item.lastMessage;
+      }
+      continue;
+    }
+    groups.set(key, { ...item, id: key, items: [item], lastResults: [...(item.lastResults || [])] });
+  }
+  return Array.from(groups.values()).map(group => ({
+    ...group,
+    items: [...group.items].sort((a, b) => Number(a.season || 0) - Number(b.season || 0)),
+  }));
+}
+
 function subscriptionMissingCount(item, missingMap) {
   if (!item || item.mediaType === 'movie' || !item.tmdbId) return 0;
   const season = Number(item.season || 0);
   return missingMap[`${Number(item.tmdbId)}:${season}`] || 0;
 }
 
-function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, onReload }) {
+function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, onReload }) {
+  const [selectedId, setSelectedId] = useState(group.items?.[0]?.id || group.id);
+  const item = group.items?.find(current => current.id === selectedId) || group.items?.[0] || group;
+  const groupItems = group.items || [item];
+  const groupMissingCount = groupItems.reduce((sum, current) => sum + subscriptionMissingCount(current, missingMap), 0);
+  const missingCount = subscriptionMissingCount(item, missingMap);
   const seriesKey = `subscription:${item.id}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -263,10 +294,12 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
   const [activeSource, setActiveSource] = useState('mp');
   const [mpPage, setMpPage] = useState(1);
   const results = item.lastResults || [];
+  const groupResults = groupItems.flatMap(current => current.lastResults || []);
   const locked = results.filter(r => r.source === 'HDHive' && r.hdhiveLocked);
-  const points = locked.reduce((sum, r) => sum + (Number(r.unlockPoints) || 0), 0);
-  const hdhiveCount = results.filter(r => r.source === 'HDHive').length;
-  const pansouCount = results.filter(r => r.source !== 'HDHive').length;
+  const groupLocked = groupResults.filter(r => r.source === 'HDHive' && r.hdhiveLocked);
+  const points = groupLocked.reduce((sum, r) => sum + (Number(r.unlockPoints) || 0), 0);
+  const hdhiveCount = groupResults.filter(r => r.source === 'HDHive').length;
+  const pansouCount = groupResults.filter(r => r.source !== 'HDHive').length;
   const pageSize = 20;
   const queryTitle = item.season && item.mediaType !== 'movie' ? `${item.title} S${String(item.season).padStart(2, '0')}` : item.title;
   const seasonCode = item.season && item.mediaType !== 'movie' ? `S${String(item.season).padStart(2, '0')}` : '';
@@ -347,8 +380,8 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
         <div className="relative aspect-[2/3] bg-gray-100">
           {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
-          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${missingCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : locked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            {missingCount > 0 ? `缺${missingCount}集` : locked.length ? `待审${locked.length}` : '已追踪'}
+          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${groupMissingCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : groupLocked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+            {groupMissingCount > 0 ? `缺${groupMissingCount}集` : groupLocked.length ? `待审${groupLocked.length}` : '已追踪'}
           </span>
           {!item.enabled && <span className="absolute left-2 top-2 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600">停用</span>}
           {points > 0 && <div className="absolute bottom-8 left-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700 shadow-sm">{points}积分</div>}
@@ -359,7 +392,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{item.title}</p>
-          <p className="mt-0.5 text-[10px] text-gray-400">{missingCount > 0 ? `缺${missingCount}集 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
+          <p className="mt-0.5 text-[10px] text-gray-400">{groupMissingCount > 0 ? `缺${groupMissingCount}集 · ` : ''}{groupItems.length > 1 ? `${groupItems.length}季 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
         </div>
       </div>
 
@@ -373,10 +406,11 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
                 <h2 className="text-base font-bold text-gray-900">{item.title}</h2>
                 <p className="text-xs text-gray-400 mt-0.5">TMDB {item.tmdbId || '未填'}{item.tmdbYear ? ` · ${item.tmdbYear}` : ''}{item.season ? ` · S${String(item.season).padStart(2, '0')}` : ''}</p>
                 <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] font-semibold">
+                  {groupItems.length > 1 && <span className="rounded bg-primary-50 px-1.5 py-0.5 text-primary-700">{groupItems.length} 季</span>}
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">PanSou {pansouCount}</span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">HDHive {hdhiveCount}</span>
-                  {missingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {missingCount}</span>}
-                  {locked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {locked.length}</span>}
+                  {groupMissingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {groupMissingCount}</span>}
+                  {groupLocked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {groupLocked.length}</span>}
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs text-gray-500">{item.overview || item.lastMessage || '点下方按钮搜索资源，支持转存 115、HDHive 解锁和 MoviePilot 下载。'}</p>
               </div>
@@ -387,6 +421,20 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
                 <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
               </div>
             </div>
+
+            {groupItems.length > 1 && (
+              <div className="flex flex-wrap gap-2 border-b border-gray-100 px-4 py-3">
+                {groupItems.map(seasonItem => {
+                  const active = seasonItem.id === item.id;
+                  const seasonMissing = subscriptionMissingCount(seasonItem, missingMap);
+                  return (
+                    <button key={seasonItem.id} type="button" onClick={() => setSelectedId(seasonItem.id)} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${active ? 'border-primary-300 bg-primary-50 text-primary-700' : 'border-gray-200 bg-white text-gray-500 hover:border-primary-200'}`}>
+                      {seasonItem.season ? `S${String(seasonItem.season).padStart(2, '0')}` : '全季'}{seasonMissing > 0 ? ` · 缺${seasonMissing}` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="grid grid-cols-3 border-b border-gray-100 text-sm font-bold">
               <button type="button" onClick={() => setActiveSource('mp')} className={`flex items-center justify-center gap-1.5 px-3 py-3 ${activeSource === 'mp' ? 'bg-primary-50 text-primary-700' : 'text-gray-500 hover:bg-gray-50'}`}>
@@ -432,7 +480,7 @@ function SubscriptionCard({ item, missingCount = 0, running, onRun, onRemove, on
 
             <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
               <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}{item.autoTransfer ? ' · 自动转存' : ''}</p>
-              <button onClick={() => onRemove(item.id)} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
+              <button onClick={() => onRemove(groupItems.map(current => current.id))} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
             </div>
           </div>
         </div>
