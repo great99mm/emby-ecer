@@ -6,7 +6,7 @@ import SearchResults from '../components/SearchResults';
 import StatCard from '../components/StatCard';
 import { Archive, CheckCircle2, Download, ExternalLink, Film, Gift, Play, Plus, Search, Sparkles, Trash2, RefreshCw, Timer, Tv, Unlock, X } from 'lucide-react';
 
-const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled: true, autoTransfer: false, targetCid: '0' };
+const emptyForm = { title: '', mediaType: 'tv', tmdbId: '', season: '', enabled: true, autoTransfer: false, targetCid: '' };
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
 
 export default function Subscriptions() {
@@ -530,7 +530,7 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
               )}
               {activeSource === 'mp' && allMP.length === 0 && !search?.mpLoading && search?.mpResults !== undefined && <p className="text-xs text-gray-400 py-2">MP无匹配结果</p>}
 
-              {activeSource !== 'mp' && visibleResults.length > 0 && <SearchResults search={{ ...(search || {}), results: visibleResults, query: search?.query || queryTitle, codes: searchCodes }} targetCid={item.targetCid || ''} subscriptionId={item.id} onUnlocked={onReload} />}
+              {activeSource !== 'mp' && visibleResults.length > 0 && <SearchResults search={{ ...(search || {}), results: visibleResults, query: search?.query || queryTitle, codes: searchCodes }} targetCid={item.targetCid && item.targetCid !== '0' ? item.targetCid : ''} subscriptionId={item.id} onUnlocked={onReload} />}
               {activeSource !== 'mp' && visibleResults.length === 0 && !search?.loading && !search?.hdhiveLoading && <p className="text-sm text-gray-400 py-3 text-center">这一栏还没有结果，点击上方按钮搜索。</p>}
               {!search && results.length === 0 && activeSource === 'mp' && <p className="text-sm text-gray-400 py-3 text-center">还没有候选资源，点击上方按钮搜索或扫描此订阅。</p>}
             </div>

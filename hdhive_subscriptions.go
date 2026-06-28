@@ -190,9 +190,6 @@ func normalizeSubscription(item subscription) subscription {
 	if item.MediaType == "movie" {
 		item.Season = 0
 	}
-	if item.TargetCID == "" {
-		item.TargetCID = "0"
-	}
 	return item
 }
 
@@ -682,7 +679,7 @@ func runSubscriptions(s settings, ids []string) (subscriptionRunResult, error) {
 				if strings.TrimSpace(candidate.URL) == "" {
 					continue
 				}
-				transfer, transferErr := transfer115(s, transferRequest{URL: candidate.URL, Password: candidate.Password, TargetCID: firstNonEmpty(item.TargetCID, s.P115TargetCID)})
+				transfer, transferErr := transfer115(s, transferRequest{URL: candidate.URL, Password: candidate.Password, TargetCID: subscriptionTargetCID(item, s)})
 				if transferErr != nil {
 					runItem.Error = transferErr.Error()
 					message += "，自动转存失败：" + transferErr.Error()
@@ -1060,6 +1057,9 @@ func (c *hdhiveClient) searchByKeyword(keyword, mediaType string) ([]hdhiveResou
 		return nil, err
 	}
 	candidates := searchHDHiveMediaCandidates(raw, keyword, mediaType)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
 	merged := make([]hdhiveResource, 0)
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
@@ -1465,6 +1465,7 @@ func extractObjectPayload(raw, token string) string {
 func searchHDHiveMediaCandidates(raw, keyword, mediaType string) []map[string]any {
 	rows := extractHDHiveArray(raw, "data")
 	keywordNorm := normalizeHDHiveKeyword(keyword)
+	keywordTokens := hdhiveKeywordTokens(keyword)
 	type scoredCandidate struct {
 		score int
 		hit   bool
@@ -1481,11 +1482,12 @@ func searchHDHiveMediaCandidates(raw, keyword, mediaType string) []map[string]an
 		if normalizedTitle == "" {
 			continue
 		}
-		hit := keywordNorm != "" && (strings.Contains(normalizedTitle, keywordNorm) || strings.Contains(keywordNorm, normalizedTitle))
-		score := 0
-		if hit {
-			score += 120
+		hit := hdhiveTitleMatchesKeyword(normalizedTitle, keywordNorm, keywordTokens)
+		if !hit {
+			continue
 		}
+		score := 0
+		score += 120
 		if strings.EqualFold(anyToString(row["type"]), mediaType) {
 			score += 20
 		}
@@ -1496,23 +1498,49 @@ func searchHDHiveMediaCandidates(raw, keyword, mediaType string) []map[string]an
 	}
 	sort.Slice(scored, func(left, right int) bool { return scored[left].score > scored[right].score })
 	out := make([]map[string]any, 0)
-	preferHits := false
 	for _, item := range scored {
-		if item.hit {
-			preferHits = true
-			break
-		}
-	}
-	for _, item := range scored {
-		if preferHits && !item.hit {
-			continue
-		}
 		out = append(out, item.row)
 		if len(out) >= 3 {
 			break
 		}
 	}
 	return out
+}
+
+func hdhiveTitleMatchesKeyword(normalizedTitle, keywordNorm string, keywordTokens []string) bool {
+	if normalizedTitle == "" || keywordNorm == "" {
+		return false
+	}
+	if strings.Contains(normalizedTitle, keywordNorm) || strings.Contains(keywordNorm, normalizedTitle) {
+		return true
+	}
+	if len(keywordTokens) == 0 {
+		return false
+	}
+	matched := 0
+	for _, token := range keywordTokens {
+		if strings.Contains(normalizedTitle, token) {
+			matched++
+		}
+	}
+	if len(keywordTokens) == 1 {
+		return matched == 1 && len(keywordTokens[0]) >= 4
+	}
+	return matched >= 2 || matched == len(keywordTokens)
+}
+
+func hdhiveKeywordTokens(value string) []string {
+	tokens := make([]string, 0)
+	seen := map[string]bool{}
+	for _, part := range regexp.MustCompile("[\\s\\-_·:：,.，。!！?？/\\\\'\"`()\\[\\]（）]+").Split(value, -1) {
+		token := normalizeHDHiveKeyword(part)
+		if len(token) < 2 || seen[token] {
+			continue
+		}
+		seen[token] = true
+		tokens = append(tokens, token)
+	}
+	return tokens
 }
 
 func extractHDHiveChunkPaths(raw string) []string {
@@ -1828,6 +1856,14 @@ func subscriptionRunIsActive() bool { subRunMu.Lock(); defer subRunMu.Unlock(); 
 
 func shouldAutoTransferSubscription(s settings, item subscription) bool {
 	return s.SubAutoTransfer || item.AutoTransfer
+}
+
+func subscriptionTargetCID(item subscription, s settings) string {
+	targetCID := strings.TrimSpace(item.TargetCID)
+	if targetCID == "" || targetCID == "0" {
+		return firstNonEmpty(s.P115TargetCID, "0")
+	}
+	return targetCID
 }
 
 func normalizeHDHiveMediaType(value string) string {
