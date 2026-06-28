@@ -339,12 +339,21 @@ function subscriptionProgress(item, missingMap) {
   return { missing: info.count || 0, owned, total, percent: total > 0 ? Math.round((owned / total) * 100) : 0, episodes: info.episodes || [] };
 }
 
+function groupSubscriptionProgress(items, missingMap) {
+  const values = (items || []).map(item => subscriptionProgress(item, missingMap));
+  const missing = values.reduce((sum, info) => sum + info.missing, 0);
+  const total = values.reduce((sum, info) => sum + info.total, 0);
+  const owned = values.reduce((sum, info) => sum + info.owned, 0);
+  return { missing, owned, total, percent: total > 0 ? Math.round((owned / total) * 100) : 0 };
+}
+
 function SubscriptionCard({ item: group, archived = false, missingMap, running, onRun, onRemove, onArchive, onReload }) {
   const [selectedId, setSelectedId] = useState(group.items?.[0]?.id || group.id);
   const item = group.items?.find(current => current.id === selectedId) || group.items?.[0] || group;
   const groupItems = group.items || [item];
   const groupMissingCount = groupItems.reduce((sum, current) => sum + subscriptionMissingCount(current, missingMap), 0);
   const progress = subscriptionProgress(item, missingMap);
+  const groupProgress = groupSubscriptionProgress(groupItems, missingMap);
   const seriesKey = `subscription:${item.id}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -461,8 +470,8 @@ function SubscriptionCard({ item: group, archived = false, missingMap, running, 
         </div>
         <div className="px-2.5 py-2">
           <p className="text-xs font-bold text-gray-900 truncate">{item.title}</p>
-          <p className="mt-0.5 text-[10px] text-gray-400">{progress.total > 0 ? `${progress.owned}/${progress.total}集 · ${progress.percent}% · ` : ''}{groupMissingCount > 0 ? `缺${groupMissingCount}集 · ` : ''}{groupItems.length > 1 ? `${groupItems.length}季 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
-          {progress.total > 0 && <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-500" style={{ width: `${progress.percent}%` }} /></div>}
+          <p className="mt-0.5 text-[10px] text-gray-400">{groupProgress.total > 0 ? `总${groupProgress.total}集 · 已有${groupProgress.owned} · 缺${groupProgress.missing} · ${groupProgress.percent}% · ` : groupMissingCount > 0 ? `缺${groupMissingCount}集 · ` : ''}{groupItems.length > 1 ? `${groupItems.length}季 · ` : ''}PanSou {pansouCount} · HDHive {hdhiveCount}</p>
+          {groupProgress.total > 0 && <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-500" style={{ width: `${groupProgress.percent}%` }} /></div>}
         </div>
       </div>
 
@@ -479,7 +488,8 @@ function SubscriptionCard({ item: group, archived = false, missingMap, running, 
                   {groupItems.length > 1 && <span className="rounded bg-primary-50 px-1.5 py-0.5 text-primary-700">{groupItems.length} 季</span>}
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">PanSou {pansouCount}</span>
                   <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">HDHive {hdhiveCount}</span>
-                  {groupMissingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {groupMissingCount}</span>}
+                  {groupProgress.total > 0 && <span className="rounded bg-primary-50 px-1.5 py-0.5 text-primary-700">总 {groupProgress.total} 集 · 缺 {groupProgress.missing}</span>}
+                  {groupProgress.total === 0 && groupMissingCount > 0 && <span className="rounded bg-red-50 px-1.5 py-0.5 text-red-600">缺集 {groupMissingCount}</span>}
                   {progress.total > 0 && <span className="rounded bg-primary-50 px-1.5 py-0.5 text-primary-700">{progress.owned}/{progress.total}集 · {progress.percent}%</span>}
                   {groupLocked.length > 0 && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">待审批 {groupLocked.length}</span>}
                 </div>
