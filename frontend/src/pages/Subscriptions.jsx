@@ -22,17 +22,22 @@ export default function Subscriptions() {
   const [tmdbResults, setTmdbResults] = useState([]);
   const [selectedTMDB, setSelectedTMDB] = useState(null);
   const [checkinLoading, setCheckinLoading] = useState(false);
+  const [archivedItems, setArchivedItems] = useState([]);
+  const [showArchived, setShowArchived] = useState(false);
 
-  const groupedItems = groupSubscriptions(items);
-  const enabledCount = groupedItems.filter(group => (group.items || []).some(item => item.enabled)).length;
-  const lockedCount = groupedItems.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0), 0);
-  const resultCount = groupedItems.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).length, 0), 0);
+  const activeGroups = groupSubscriptions(items);
+  const archivedGroups = groupSubscriptions(archivedItems);
+  const groupedItems = showArchived ? archivedGroups : activeGroups;
+  const enabledCount = activeGroups.filter(group => (group.items || []).some(item => item.enabled)).length;
+  const lockedCount = activeGroups.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).filter(r => r.source === 'HDHive' && r.hdhiveLocked).length, 0), 0);
+  const resultCount = activeGroups.reduce((sum, group) => sum + (group.items || []).reduce((inner, item) => inner + (item.lastResults || []).length, 0), 0);
   const missingBySubscription = buildSubscriptionMissingMap(missing);
 
   const load = async () => {
     try {
       const data = await api('/api/subscriptions');
       setItems(data.items || []);
+      setArchivedItems(data.archivedItems || []);
       setRunning(!!data.running);
     } catch (err) {
       toast.error(err.message);
@@ -111,6 +116,7 @@ export default function Subscriptions() {
     try {
       const data = await api('/api/subscriptions/delete', { method: 'POST', body: JSON.stringify({ ids }) });
       setItems(data.items || []);
+      setArchivedItems(data.archivedItems || []);
       toast.success('已删除');
     } catch (err) {
       toast.error(err.message);
@@ -132,11 +138,12 @@ export default function Subscriptions() {
     }
   };
 
-  const archiveSubscriptions = async (ids) => {
+  const archiveSubscriptions = async (ids, archived = true) => {
     try {
-      const data = await api('/api/subscriptions/archive', { method: 'POST', body: JSON.stringify({ ids }) });
+      const data = await api('/api/subscriptions/archive', { method: 'POST', body: JSON.stringify({ ids, archived }) });
       setItems(data.items || []);
-      toast.success('已归档');
+      setArchivedItems(data.archivedItems || []);
+      toast.success(archived ? '已归档' : '已恢复');
     } catch (err) {
       toast.error(err.message);
     }
@@ -158,11 +165,11 @@ export default function Subscriptions() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
-        <StatCard label="订阅" value={groupedItems.length} icon={Timer} />
+        <StatCard label="订阅" value={activeGroups.length} icon={Timer} />
         <StatCard label="启用中" value={enabledCount} icon={CheckCircle2} />
         <StatCard label="候选资源" value={resultCount} icon={Search} />
         <StatCard label="待审批" value={lockedCount} icon={Unlock} accent />
-        <StatCard label="自动转存" value={groupedItems.filter(group => (group.items || []).some(item => item.autoTransfer)).length} icon={Download} />
+        <StatCard label="自动转存" value={activeGroups.filter(group => (group.items || []).some(item => item.autoTransfer)).length} icon={Download} />
       </div>
 
       <div className="card overflow-hidden p-0">
@@ -257,9 +264,16 @@ export default function Subscriptions() {
         )}
       </div>
 
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-bold text-gray-900">{showArchived ? '归档订阅' : '订阅列表'}</div>
+        <button type="button" onClick={() => setShowArchived(value => !value)} className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-bold ${showArchived ? 'border-primary-200 bg-primary-50 text-primary-700' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50'}`}>
+          <Archive className="h-3.5 w-3.5" /> {showArchived ? '返回订阅' : `归档 ${archivedGroups.length}`}
+        </button>
+      </div>
+
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-        {groupedItems.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">暂无订阅，先从 TMDB 搜索并添加。</div> : groupedItems.map(item => (
-          <SubscriptionCard key={item.id} item={item} missingMap={missingBySubscription} running={running} onRun={run} onRemove={remove} onArchive={archiveSubscriptions} onReload={load} />
+        {groupedItems.length === 0 ? <div className="card col-span-full text-center text-sm text-gray-500">{showArchived ? '暂无归档订阅。' : '暂无订阅，先从 TMDB 搜索并添加。'}</div> : groupedItems.map(item => (
+          <SubscriptionCard key={item.id} item={item} archived={showArchived} missingMap={missingBySubscription} running={running} onRun={run} onRemove={remove} onArchive={archiveSubscriptions} onReload={load} />
         ))}
       </div>
 
@@ -325,7 +339,7 @@ function subscriptionProgress(item, missingMap) {
   return { missing: info.count || 0, owned, total, percent: total > 0 ? Math.round((owned / total) * 100) : 0, episodes: info.episodes || [] };
 }
 
-function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, onArchive, onReload }) {
+function SubscriptionCard({ item: group, archived = false, missingMap, running, onRun, onRemove, onArchive, onReload }) {
   const [selectedId, setSelectedId] = useState(group.items?.[0]?.id || group.id);
   const item = group.items?.find(current => current.id === selectedId) || group.items?.[0] || group;
   const groupItems = group.items || [item];
@@ -351,7 +365,12 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
 
   const archive = async () => {
     if (!window.confirm('确认归档这个订阅？归档后会隐藏并停止自动扫描。')) return;
-    await onArchive(groupItems.map(current => current.id));
+    await onArchive(groupItems.map(current => current.id), true);
+    setOpen(false);
+  };
+
+  const restore = async () => {
+    await onArchive(groupItems.map(current => current.id), false);
     setOpen(false);
   };
 
@@ -431,7 +450,7 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
           {item.posterPath ? <img src={TMDB_IMG + item.posterPath} className="h-full w-full object-cover" alt="" /> : <div className="flex h-full w-full items-center justify-center text-4xl text-gray-300">🎬</div>}
           <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
           <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${groupMissingCount > 0 ? 'bg-red-50 text-red-700 border-red-200' : groupLocked.length ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-            {groupMissingCount > 0 ? `缺${groupMissingCount}集` : groupLocked.length ? `待审${groupLocked.length}` : '已追踪'}
+            {archived ? '已归档' : groupMissingCount > 0 ? `缺${groupMissingCount}集` : groupLocked.length ? `待审${groupLocked.length}` : '已追踪'}
           </span>
           {!item.enabled && <span className="absolute left-2 top-2 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600">停用</span>}
           {points > 0 && <div className="absolute bottom-8 left-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700 shadow-sm">{points}积分</div>}
@@ -467,9 +486,9 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
                 <p className="mt-1 line-clamp-2 text-xs text-gray-500">{item.overview || item.lastMessage || '点下方按钮搜索资源，支持转存 115、HDHive 解锁和 MoviePilot 下载。'}</p>
               </div>
               <div className="shrink-0 flex items-center gap-1">
-                <button title="扫描此订阅" onClick={() => onRun(item.id)} disabled={running} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40">
+                {!archived && <button title="扫描此订阅" onClick={() => onRun(item.id)} disabled={running} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40">
                   <RefreshCw className={`w-4 h-4 text-gray-400 ${running ? 'animate-spin' : ''}`} />
-                </button>
+                </button>}
                 <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
               </div>
             </div>
@@ -488,7 +507,7 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
               </div>
             )}
 
-            <div className="px-4 py-3 border-b border-gray-100">
+            {!archived && <div className="px-4 py-3 border-b border-gray-100">
               {progress.total > 0 && (
                 <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
                   <div className="flex items-center justify-between text-xs font-bold text-gray-600"><span>媒体库进度</span><span>{progress.owned}/{progress.total} 集 · {progress.percent}%</span></div>
@@ -506,7 +525,7 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
                 <button type="button" onClick={() => setActiveSource('hdhive')} className={`${activeSource === 'hdhive' ? 'text-amber-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>HDHive · {hdhiveResults.length}</button>
                 <button type="button" onClick={() => setActiveSource('pan')} className={`${activeSource === 'pan' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>盘搜 · {pansouResults.length}</button>
               </div>
-            </div>
+            </div>}
 
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
 
@@ -536,9 +555,9 @@ function SubscriptionCard({ item: group, missingMap, running, onRun, onRemove, o
             </div>
 
             <div className="flex items-center justify-between gap-2 border-t border-gray-100 px-4 py-3">
-              <p className="text-[11px] text-gray-400">上次：{item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}{item.autoTransfer ? ' · 自动转存' : ''}</p>
+              <p className="text-[11px] text-gray-400">{archived ? `归档：${item.archivedAt ? new Date(item.archivedAt).toLocaleString('zh-CN') : '未知时间'}` : `上次：${item.lastRunAt ? new Date(item.lastRunAt).toLocaleString('zh-CN') : '未扫描'}${item.autoTransfer ? ' · 自动转存' : ''}`}</p>
               <div className="flex items-center gap-2">
-                <button onClick={archive} className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs font-semibold text-gray-500 hover:bg-gray-50"><Archive className="h-3.5 w-3.5" /> 归档</button>
+                {archived ? <button onClick={restore} className="inline-flex items-center gap-1 rounded-md border border-primary-200 px-2.5 py-1.5 text-xs font-semibold text-primary-600 hover:bg-primary-50"><RefreshCw className="h-3.5 w-3.5" /> 恢复</button> : <button onClick={archive} className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs font-semibold text-gray-500 hover:bg-gray-50"><Archive className="h-3.5 w-3.5" /> 归档</button>}
                 <button onClick={() => onRemove(groupItems.map(current => current.id))} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-semibold text-red-500 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> 删除</button>
               </div>
             </div>

@@ -130,11 +130,19 @@ func newSubscriptionStore(path string) *subscriptionStore {
 }
 
 func (s *subscriptionStore) List() []subscription {
+	return s.ListArchived(false)
+}
+
+func (s *subscriptionStore) ArchivedList() []subscription {
+	return s.ListArchived(true)
+}
+
+func (s *subscriptionStore) ListArchived(archived bool) []subscription {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]subscription, 0, len(s.items))
 	for _, item := range s.items {
-		if item.Archived {
+		if item.Archived != archived {
 			continue
 		}
 		items = append(items, item)
@@ -279,17 +287,8 @@ func (s *subscriptionStore) Archive(ids []string, archived bool) ([]subscription
 		s.items[id] = item
 	}
 	err := s.persistLocked()
-	items := make([]subscription, 0, len(s.items))
-	for _, item := range s.items {
-		if !item.Archived {
-			items = append(items, item)
-		}
-	}
 	s.mu.Unlock()
-	sort.Slice(items, func(left, right int) bool {
-		return strings.ToLower(items[left].Title) < strings.ToLower(items[right].Title)
-	})
-	return items, err
+	return s.List(), err
 }
 
 func (s *subscriptionStore) UpdateResult(id string, results []normalizedResult, status, message string) {
@@ -352,7 +351,11 @@ func (s *subscriptionStore) persistLocked() error {
 }
 
 func handleListSubscriptions(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": subStore.List(), "running": subscriptionRunIsActive()})
+	writeJSON(w, http.StatusOK, subscriptionListResponse())
+}
+
+func subscriptionListResponse() map[string]any {
+	return map[string]any{"items": subStore.List(), "archivedItems": subStore.ArchivedList(), "running": subscriptionRunIsActive()}
 }
 
 func handleSaveSubscription(w http.ResponseWriter, r *http.Request) {
@@ -490,7 +493,9 @@ func handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": subStore.List()})
+	response := subscriptionListResponse()
+	response["ok"] = true
+	writeJSON(w, http.StatusOK, response)
 }
 
 func handleArchiveSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -506,12 +511,14 @@ func handleArchiveSubscriptions(w http.ResponseWriter, r *http.Request) {
 	if body.Archived != nil {
 		archived = *body.Archived
 	}
-	items, err := subStore.Archive(body.IDs, archived)
+	_, err := subStore.Archive(body.IDs, archived)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+	response := subscriptionListResponse()
+	response["ok"] = true
+	writeJSON(w, http.StatusOK, response)
 }
 
 func handleRunSubscriptions(w http.ResponseWriter, r *http.Request) {
