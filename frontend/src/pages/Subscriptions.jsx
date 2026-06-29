@@ -372,6 +372,41 @@ function SubscriptionCard({ item: group, archived = false, missingMap, running, 
   const seasonCode = item.season && item.mediaType !== 'movie' ? `S${String(item.season).padStart(2, '0')}` : '';
   const searchCodes = seasonCode || item.title;
 
+  const loadMPSubscribeStatus = async (force = false) => {
+    if (!item.tmdbId) return;
+    if (!force && search?.mpSubscribeLoading) return;
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: true, mpSubscribeError: '' }));
+    try {
+      const data = await api('/api/mp/subscribe/status', {
+        method: 'POST',
+        body: JSON.stringify({ tmdbId: String(item.tmdbId), mediaType: item.mediaType || 'tv', season: item.season || 0 }),
+      });
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: false, mpSubscribeStatus: data, mpSubscribeChecked: true, mpSubscribeError: '' }));
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: false, mpSubscribeChecked: true, mpSubscribeError: err.message }));
+    }
+  };
+
+  const doMPSubscribe = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeSending: true, mpSubscribeError: '' }));
+    try {
+      await api('/api/mp/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ tmdbId: String(item.tmdbId || ''), mediaType: item.mediaType || 'tv', season: item.season || 0, title: item.title || '' }),
+      });
+      toast.success('已发送到 MP 订阅');
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeSending: false }));
+      await loadMPSubscribeStatus(true);
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeSending: false, mpSubscribeError: err.message }));
+      toast.error(err.message);
+    }
+  };
+
+  useEffect(() => {
+    if (open && activeSource === 'mp' && item.tmdbId) loadMPSubscribeStatus();
+  }, [open, activeSource, item.id, item.tmdbId, item.mediaType, item.season]);
+
   const archive = async () => {
     if (!window.confirm('确认归档这个订阅？归档后会隐藏并停止自动扫描。')) return;
     await onArchive(groupItems.map(current => current.id), true);
@@ -540,6 +575,34 @@ function SubscriptionCard({ item: group, archived = false, missingMap, running, 
             <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
 
               {activeSource === 'mp' && search?.mpKeywords && <div className="flex flex-wrap gap-1 mb-2">{search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}</div>}
+              {activeSource === 'mp' && (
+                <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-gray-600">MP 订阅状态</p>
+                      <p className={`mt-1 text-xs font-semibold ${search?.mpSubscribeError ? 'text-red-600' : search?.mpSubscribeLoading ? 'text-gray-400' : search?.mpSubscribeStatus?.exists ? 'text-emerald-600' : search?.mpSubscribeChecked ? 'text-gray-500' : 'text-gray-400'}`}>
+                        {search?.mpSubscribeError
+                          ? search.mpSubscribeError
+                          : search?.mpSubscribeLoading
+                            ? '状态查询中...'
+                            : search?.mpSubscribeStatus?.exists
+                              ? `已订阅${search.mpSubscribeStatus?.season ? ` · S${String(search.mpSubscribeStatus.season).padStart(2, '0')}` : ''}${search.mpSubscribeStatus?.status ? ` · ${search.mpSubscribeStatus.status}` : ''}`
+                              : search?.mpSubscribeChecked
+                                ? '未订阅'
+                                : '等待查询'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={doMPSubscribe}
+                      disabled={!item.tmdbId || !!search?.mpSubscribeSending || !!search?.mpSubscribeLoading || !!search?.mpSubscribeStatus?.exists}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-md border border-primary-200 px-3 py-2 text-sm font-semibold text-primary-600 hover:bg-primary-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Plus className="w-4 h-4" /> {search?.mpSubscribeSending ? '发送中...' : '发送到 MP 订阅'}
+                    </button>
+                  </div>
+                </div>
+              )}
               {activeSource === 'mp' && search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
               {activeSource === 'hdhive' && search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
               {activeSource === 'pan' && search?.loading && <p className="text-sm text-gray-400 py-2">盘搜中...</p>}
