@@ -17,6 +17,13 @@ export default function SearchResults({ search, targetCid = '', subscriptionId =
   const codes = (search.codes || '').split('、').filter(Boolean);
 
   const matchInfo = (result) => {
+    // 后端解析出的集号命中优先
+    const m = result.match;
+    if (m) {
+      if (m.matchedEpisodes?.length) return { matched: true, type: 'match', tags: m.tags };
+      if (m.episodes?.length) return { matched: false };
+      if (m.seasonPack || m.seasonMatched) return { matched: true, type: 'include', tags: m.tags };
+    }
     const t = (result.title || '').toUpperCase();
     const d = (result.description || '');
     const desc = result.title || result.description || '';

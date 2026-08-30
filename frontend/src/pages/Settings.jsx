@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Save, Shield, Server, BadgeCheck, Search, CloudUpload, KeyRound, Download, Sparkles, Bot, Timer } from 'lucide-react';
+import { Save, Shield, Server, BadgeCheck, Search, CloudUpload, KeyRound, Download, Sparkles, Bot, Timer, Radar } from 'lucide-react';
 
-const sectionIcons = { Emby: Server, TMDB: BadgeCheck, PanSou: Search, HDHive: Sparkles, '115 转存': CloudUpload, MoviePilot: Download, '订阅扫描': Timer, '大模型识别': Bot, '账号安全': Shield };
+const sectionIcons = { Emby: Server, TMDB: BadgeCheck, PanSou: Search, HDHive: Sparkles, '115 转存': CloudUpload, MoviePilot: Download, '缺集扫描': Radar, '订阅扫描': Timer, '大模型识别': Bot, '账号安全': Shield };
 
 function AuthSection({ title, icon, children, ready, onTest, target }) {
   const Icon = icon;
@@ -78,9 +78,35 @@ export default function Settings() {
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
   const [refreshingHDHive, setRefreshingHDHive] = useState(false);
+  const [libraries, setLibraries] = useState([]);
+  const [loadingLibraries, setLoadingLibraries] = useState(false);
 
   const update = (name, value) => setForm(f => ({ ...f, [name]: value }));
   const get = (name) => form[name] !== undefined ? form[name] : (settings[name] || '');
+
+  const excludedLibraries = form.excludedLibraries !== undefined ? form.excludedLibraries : (settings.excludedLibraries || []);
+  const embyReady = !!settings.ready?.emby;
+
+  const loadLibraries = async () => {
+    setLoadingLibraries(true);
+    try {
+      const data = await api('/api/emby/libraries');
+      setLibraries(data.libraries || []);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setLoadingLibraries(false);
+    }
+  };
+
+  useEffect(() => { if (embyReady) loadLibraries(); }, [embyReady]);
+
+  const toggleLibrary = (id) => {
+    const next = excludedLibraries.includes(id)
+      ? excludedLibraries.filter(item => item !== id)
+      : [...excludedLibraries, id];
+    update('excludedLibraries', next);
+  };
 
   const testConnection = async (target) => {
     try {
@@ -156,6 +182,40 @@ export default function Settings() {
         <Input name="embyApiKey" label="Emby API Key" value={get('embyApiKey')} onChange={e => update('embyApiKey', e.target.value)} type="password" placeholder="留空表示不覆盖" />
         <Input name="embyUserId" label="Emby UserId (可选)" value={get('embyUserId')} onChange={e => update('embyUserId', e.target.value)} placeholder="不填则使用全局 /Items" />
         <Input name="scanConcurrency" label="扫描并发数" value={get('scanConcurrency')} onChange={e => update('scanConcurrency', e.target.value)} type="number" placeholder="默认 4，最大 16" />
+      </AuthSection>
+
+      <AuthSection title="缺集扫描" icon={sectionIcons['缺集扫描']} ready={settings.scanAutoEnabled}>
+        <Checkbox name="scanAutoEnabled" label="启用定时自动扫描" checked={get('scanAutoEnabled') === true || get('scanAutoEnabled') === 'true'} onChange={e => update('scanAutoEnabled', e.target.checked)} />
+        <Checkbox name="scanAutoRecentOnly" label="定时扫描只跑最近变更（更快）" checked={get('scanAutoRecentOnly') === true || get('scanAutoRecentOnly') === 'true'} onChange={e => update('scanAutoRecentOnly', e.target.checked)} />
+        <Input name="scanAutoInterval" label="自动扫描间隔（小时）" value={get('scanAutoInterval')} onChange={e => update('scanAutoInterval', e.target.value)} type="number" placeholder="默认 12，最大 168" />
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-xs font-bold text-gray-600">屏蔽媒体库（勾选的库不参与缺集扫描）</span>
+            <button type="button" onClick={loadLibraries} disabled={loadingLibraries} className="text-xs font-bold text-primary-600 hover:text-primary-700 disabled:opacity-50">
+              {loadingLibraries ? '读取中...' : '刷新列表'}
+            </button>
+          </div>
+          {libraries.length === 0 ? (
+            <p className="rounded-md border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-400">
+              {embyReady ? '还没读取到媒体库，点击右上角刷新。' : '请先配置并保存 Emby 地址和 API Key。'}
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {libraries.map(library => (
+                <label key={library.id} className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={excludedLibraries.includes(library.id) || excludedLibraries.includes(library.name)}
+                    onChange={() => toggleLibrary(library.id)}
+                    className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <span className="min-w-0 flex-1 truncate">{library.name}</span>
+                  <span className="shrink-0 text-xs font-bold text-gray-400">{library.seriesCount || 0} 部剧</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
       </AuthSection>
 
       <AuthSection title="TMDB" icon={sectionIcons.TMDB} ready={ready.tmdb} onTest={testConnection} target="tmdb">

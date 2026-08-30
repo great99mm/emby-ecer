@@ -29,6 +29,9 @@ const (
 	seriesScanCacheVersion = "complete-series-archive-v1"
 )
 
+// tmdbBaseURL 是变量而非常量，便于测试指向本地 mock
+var tmdbBaseURL = "https://api.themoviedb.org/3"
+
 var (
 	appUsers        map[string]string
 	appUsersMu      sync.RWMutex
@@ -220,11 +223,16 @@ func randomID(n int) string {
 }
 
 type settings struct {
-	EmbyURL         string `json:"embyUrl"`
-	EmbyAPIKey      string `json:"embyApiKey"`
-	EmbyUserID      string `json:"embyUserId"`
-	TMDBAPIKey      string `json:"tmdbApiKey"`
-	ScanConcurrency int    `json:"scanConcurrency"`
+	EmbyURL            string   `json:"embyUrl"`
+	EmbyAPIKey         string   `json:"embyApiKey"`
+	EmbyUserID         string   `json:"embyUserId"`
+	TMDBAPIKey         string   `json:"tmdbApiKey"`
+	ScanConcurrency    int      `json:"scanConcurrency"`
+	ExcludedLibraries  []string `json:"excludedLibraries"`
+	ScanAutoEnabled    bool     `json:"scanAutoEnabled"`
+	ScanAutoInterval   int      `json:"scanAutoInterval"`
+	ScanAutoRecentOnly bool     `json:"scanAutoRecentOnly"`
+
 	PansouURL       string `json:"pansouUrl"`
 	PansouUsername  string `json:"pansouUsername"`
 	PansouPassword  string `json:"pansouPassword"`
@@ -296,7 +304,9 @@ func main() {
 	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
 	jobMgr = newJobManager(getenv("JOB_STATE_PATH", filepath.Join(filepath.Dir(configPath), "jobs.json")))
 	subStore = newSubscriptionStore(getenv("SUBSCRIPTIONS_PATH", filepath.Join(filepath.Dir(configPath), "subscriptions.json")))
+	episodeIgnores = newEpisodeIgnoreStore(getenv("EPISODE_IGNORES_PATH", filepath.Join(filepath.Dir(configPath), "episode-ignores.json")))
 	startSubscriptionScheduler()
+	startScanScheduler()
 
 	port := getenv("PORT", "3000")
 	server := &http.Server{
@@ -457,13 +467,15 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 
 	case r.URL.Path == "/api/search" && r.Method == http.MethodPost:
 		var body struct {
-			Keyword string `json:"keyword"`
+			Keyword  string `json:"keyword"`
+			Season   int    `json:"season"`
+			Episodes []int  `json:"episodes"`
 		}
 		if err := readJSON(r, &body); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		result, err := searchKeyword(store.Get(), body.Keyword)
+		result, err := searchKeywordScored(store.Get(), body.Keyword, scoreTarget{Season: body.Season, Episodes: body.Episodes})
 		if err != nil {
 			writeError(w, statusFromError(err), err)
 			return
@@ -499,6 +511,21 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+
+	case r.URL.Path == "/api/scan/verify" && r.Method == http.MethodPost:
+		handleVerifyScan(w, r)
+
+	case r.URL.Path == "/api/emby/libraries" && r.Method == http.MethodGet:
+		handleEmbyLibraries(w, r)
+
+	case r.URL.Path == "/api/episode-ignores" && r.Method == http.MethodGet:
+		handleGetEpisodeIgnores(w, r)
+
+	case r.URL.Path == "/api/episode-ignores" && r.Method == http.MethodPost:
+		handleAddEpisodeIgnores(w, r)
+
+	case r.URL.Path == "/api/episode-ignores/delete" && r.Method == http.MethodPost:
+		handleDeleteEpisodeIgnores(w, r)
 
 	case r.URL.Path == "/api/exemptions" && r.Method == http.MethodGet:
 		handleGetExemptions(w, r)
@@ -561,6 +588,12 @@ func settingsFromEnv() settings {
 		EmbyUserID:      os.Getenv("EMBY_USER_ID"),
 		TMDBAPIKey:      os.Getenv("TMDB_API_KEY"),
 		ScanConcurrency: clampScanConcurrency(getenvInt("SCAN_CONCURRENCY", 4)),
+
+		ExcludedLibraries:  splitCommaList(os.Getenv("SCAN_EXCLUDED_LIBRARIES")),
+		ScanAutoEnabled:    getenvBool("SCAN_AUTO_ENABLED", false),
+		ScanAutoInterval:   clampIntervalHours(getenvInt("SCAN_AUTO_INTERVAL_HOURS", 12)),
+		ScanAutoRecentOnly: getenvBool("SCAN_AUTO_RECENT_ONLY", true),
+
 		PansouURL:       getenv("PANSOU_URL", defaultPanSouURL),
 		PansouUsername:  os.Getenv("PANSOU_USERNAME"),
 		PansouPassword:  os.Getenv("PANSOU_PASSWORD"),
@@ -620,6 +653,12 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	setPlain("scanConcurrency", func(v string) {
 		next.ScanConcurrency = clampScanConcurrency(parseInt(v))
 	})
+	if raw, ok := input["excludedLibraries"]; ok {
+		next.ExcludedLibraries = toStringList(raw)
+	}
+	setPlain("scanAutoEnabled", func(v string) { next.ScanAutoEnabled = parseBool(v) })
+	setPlain("scanAutoInterval", func(v string) { next.ScanAutoInterval = clampIntervalHours(parseInt(v)) })
+	setPlain("scanAutoRecentOnly", func(v string) { next.ScanAutoRecentOnly = parseBool(v) })
 	setPlain("pansouUrl", func(v string) {
 		if v == "" {
 			v = defaultPanSouURL
@@ -728,6 +767,12 @@ func maskSettings(s settings) map[string]any {
 		"embyUserId":      s.EmbyUserID,
 		"tmdbApiKey":      maskSecret(s.TMDBAPIKey, 4),
 		"scanConcurrency": clampScanConcurrency(s.ScanConcurrency),
+
+		"excludedLibraries":  compactStringSlice(s.ExcludedLibraries),
+		"scanAutoEnabled":    s.ScanAutoEnabled,
+		"scanAutoInterval":   clampIntervalHours(s.ScanAutoInterval),
+		"scanAutoRecentOnly": s.ScanAutoRecentOnly,
+
 		"pansouUrl":       s.PansouURL,
 		"pansouUsername":  s.PansouUsername,
 		"pansouPassword":  maskSecret(s.PansouPassword, 4),
@@ -1134,7 +1179,8 @@ func searchTMDBForSubscriptions(s settings, query, mediaType string) ([]map[stri
 }
 
 type embyItemsResp struct {
-	Items []embyItem `json:"Items"`
+	Items            []embyItem `json:"Items"`
+	TotalRecordCount int        `json:"TotalRecordCount"`
 }
 
 type embyItem struct {
@@ -1160,6 +1206,7 @@ type embyEpisode struct {
 	Name              string            `json:"Name"`
 	ParentIndexNumber int               `json:"ParentIndexNumber"`
 	IndexNumber       int               `json:"IndexNumber"`
+	IndexNumberEnd    int               `json:"IndexNumberEnd"`
 	ProviderIDs       map[string]string `json:"ProviderIds"`
 	LocationType      string            `json:"LocationType"`
 	IsMissing         bool              `json:"IsMissing"`
@@ -1292,7 +1339,11 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	if err != nil {
 		return nil, err
 	}
+	excludedItems := excludedLibraryItems(s)
 	for _, item := range allItems {
+		if excludedItems[item.ID] {
+			continue
+		}
 		switch item.Type {
 		case "Series":
 			seriesTotal++
@@ -1400,6 +1451,46 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		onProgress(processed, total, message, current, snapshot)
 	}
 	advanceProgress(0, "开始扫描媒体库...", "初始化")
+
+	// 最近变更模式：Emby 侧没动过的剧直接沿用上次结果，不再跑 TMDB 比对
+	carriedMissing := map[string][]missingEpisode{}
+	incremental := recentOnly && !changedSince.IsZero() && len(onlySeriesIDs) == 0
+	if incremental {
+		carriedMissing = previousMissingBySeries()
+	}
+	skipUnchanged := func(series embyItem) bool {
+		return incremental && !itemChangedSince(series, changedSince)
+	}
+	pendingSeriesCount := 0
+	for _, series := range seriesItems {
+		if skipUnchanged(series) {
+			continue
+		}
+		if len(onlySeriesIDs) == 0 && !recentOnly {
+			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
+				continue
+			}
+		}
+		pendingSeriesCount++
+	}
+
+	// 一次性拉全库单集，替代逐剧请求；只有一两部剧要扫时，逐剧读取更划算
+	inventory := map[string]*seriesInventory{}
+	useInventory := false
+	if pendingSeriesCount > 1 {
+		advanceProgress(0, "正在拉取全库单集缓存...", "初始化")
+		loaded, invErr := loadEpisodeInventory(s, func(page, seriesCount int) {
+			advanceProgress(0, fmt.Sprintf("正在拉取全库单集缓存（第 %d 页 / 已覆盖 %d 部剧）...", page, seriesCount), "初始化")
+		})
+		if invErr != nil {
+			log.Printf("全库单集缓存拉取失败，回退到逐剧读取: %v", invErr)
+		} else {
+			inventory = loaded
+			useInventory = true
+			advanceProgress(0, fmt.Sprintf("全库单集缓存就绪，覆盖 %d 部剧", len(inventory)), "初始化")
+		}
+	}
+
 	addSkipped := func(series embyItem, action, reason string) {
 		mu.Lock()
 		skippedSeries = append(skippedSeries, scanDiagnosticEntry{ID: series.ID, Name: series.Name, Action: action, Reason: reason})
@@ -1418,6 +1509,17 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
+		if skipUnchanged(series) {
+			carried := carriedMissing[series.ID]
+			mu.Lock()
+			matchedSeries++
+			cachedSeries++
+			missing = append(missing, carried...)
+			mu.Unlock()
+			addSkipped(series, "unchanged", fmt.Sprintf("自上次扫描以来 Emby 侧无变化，沿用上次结果（%d 集缺失）", len(carried)))
+			advanceProgress(3, fmt.Sprintf("《%s》自上次扫描无变化，跳过", title), title)
+			return
+		}
 		forceRescanSeries := len(onlySeriesIDs) > 0 || recentOnly
 		if !forceRescanSeries {
 			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
@@ -1451,36 +1553,32 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		}
 		advanceProgress(1, fmt.Sprintf("已匹配《%s》的 TMDB 信息", title), title)
 
-		owned := map[string]bool{}
-		ownedTMDBEpisodes := map[int]bool{}
-		embySeasons := map[int]bool{}
-
-		seriesEpisodes, err := loadSeriesEpisodes(s, series.ID, func(page, count int) {
-			adjustTotal(1)
-			advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
-		})
-		if err != nil {
-			unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
-			mu.Lock()
-			unmatchedSeries = append(unmatchedSeries, unmatched)
-			mu.Unlock()
-			seriesScanCache.Delete(series.ID)
-			advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
-			return
+		var inv *seriesInventory
+		if useInventory {
+			if cached, ok := inventory[series.ID]; ok {
+				inv = cached
+			} else {
+				inv = newSeriesInventory()
+			}
+			advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
+		} else {
+			seriesEpisodes, err := loadSeriesEpisodes(s, series.ID, func(page, count int) {
+				adjustTotal(1)
+				advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
+			})
+			if err != nil {
+				unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
+				mu.Lock()
+				unmatchedSeries = append(unmatchedSeries, unmatched)
+				mu.Unlock()
+				seriesScanCache.Delete(series.ID)
+				advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
+				return
+			}
+			inv = buildSeriesInventory(seriesEpisodes)
+			advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
 		}
-		advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
-
-		for _, ep := range seriesEpisodes {
-			if ep.ParentIndexNumber > 0 && ep.IndexNumber > 0 {
-				owned[fmt.Sprintf("%d:%d", ep.ParentIndexNumber, ep.IndexNumber)] = true
-			}
-			if ep.ParentIndexNumber > 0 {
-				embySeasons[ep.ParentIndexNumber] = true
-			}
-			if id := parseInt(providerID(ep.ProviderIDs, "tmdb")); id > 0 {
-				ownedTMDBEpisodes[id] = true
-			}
-		}
+		embySeasons := inv.Seasons
 
 		var tv tmdbTVDetail
 		if err := tmdbGet(s, fmt.Sprintf("/tv/%d", resolved), map[string]string{"language": "zh-CN"}, &tv); err != nil {
@@ -1506,6 +1604,13 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		adjustTotal(seasonWork)
 		for _, season := range tv.Seasons {
 			if season.SeasonNumber <= 0 || season.EpisodeCount <= 0 {
+				continue
+			}
+			// 本季已有集数不少于 TMDB 记录的总集数，直接判定完整，省掉一次季详情请求
+			if inv.SeasonOwned[season.SeasonNumber] >= season.EpisodeCount {
+				totalTMDBCount += season.EpisodeCount
+				ownedCount += season.EpisodeCount
+				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季已完整，跳过 TMDB 比对", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 				continue
 			}
 			var seasonDetail tmdbSeasonDetail
@@ -1534,9 +1639,13 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				if airedOnly && ep.AirDate != "" && ep.AirDate > time.Now().Format("2006-01-02") {
 					continue
 				}
+				isOwned := inv.has(season.SeasonNumber, ep.EpisodeNumber) || (ep.ID > 0 && inv.TMDBEpisodeIDs[ep.ID])
+				// 手动忽略的单集不参与统计，避免它一直把健康度压在 99%
+				if !isOwned && episodeIgnores.Has(series.ID, season.SeasonNumber, ep.EpisodeNumber) {
+					continue
+				}
 				totalTMDBCount++
-				key := fmt.Sprintf("%d:%d", season.SeasonNumber, ep.EpisodeNumber)
-				if owned[key] || (ep.ID > 0 && ownedTMDBEpisodes[ep.ID]) {
+				if isOwned {
 					ownedCount++
 					continue
 				}
@@ -1582,7 +1691,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			compareReason = fmt.Sprintf("已匹配并发现 %d 集缺失", len(localMissing))
 		} else if totalTMDBCount == 0 {
 			compareReason = "TMDB 没有可比对的已播出集数"
-		} else if len(seriesEpisodes) == 0 {
+		} else if inv.Total == 0 {
 			compareReason = "Emby 没有读取到实际已拥有剧集，且未发现可加入的缺集"
 		} else if ownedCount >= totalTMDBCount {
 			compareReason = "Emby 读取到的季集号/TMDB 集 ID 已覆盖 TMDB 已播出集数"
@@ -1593,7 +1702,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			TMDBID:          resolved,
 			TMDBName:        officialTitle,
 			TMDBYear:        firstYear(tv.FirstAirDate),
-			EmbyEpisodes:    len(seriesEpisodes),
+			EmbyEpisodes:    inv.Total,
 			EmbySeasonCount: len(embySeasons),
 			TMDBEpisodes:    totalTMDBCount,
 			OwnedEpisodes:   ownedCount,
@@ -1788,19 +1897,26 @@ type pansouResult struct {
 }
 
 type normalizedResult struct {
-	Title        string   `json:"title"`
-	URL          string   `json:"url"`
-	Password     string   `json:"password"`
-	Source       string   `json:"source"`
-	Datetime     string   `json:"datetime"`
-	Images       []string `json:"images"`
-	Query        string   `json:"query"`
-	HDHiveSlug   string   `json:"hdhiveSlug,omitempty"`
-	HDHiveLocked bool     `json:"hdhiveLocked,omitempty"`
-	UnlockPoints int      `json:"unlockPoints,omitempty"`
+	Title        string         `json:"title"`
+	URL          string         `json:"url"`
+	Password     string         `json:"password"`
+	Source       string         `json:"source"`
+	Datetime     string         `json:"datetime"`
+	Images       []string       `json:"images"`
+	Query        string         `json:"query"`
+	Note         string         `json:"note,omitempty"`
+	Match        *resourceScore `json:"match,omitempty"`
+	MatchScore   int            `json:"matchScore,omitempty"`
+	HDHiveSlug   string         `json:"hdhiveSlug,omitempty"`
+	HDHiveLocked bool           `json:"hdhiveLocked,omitempty"`
+	UnlockPoints int            `json:"unlockPoints,omitempty"`
 }
 
 func searchKeyword(s settings, keyword string) (map[string]any, error) {
+	return searchKeywordScored(s, keyword, scoreTarget{})
+}
+
+func searchKeywordScored(s settings, keyword string, target scoreTarget) (map[string]any, error) {
 	if err := requireFields(s, "pansouUrl"); err != nil {
 		return nil, err
 	}
@@ -1832,7 +1948,7 @@ func searchKeyword(s settings, keyword string) (map[string]any, error) {
 	if err := unmarshalPansouResp(raw, &resp); err != nil {
 		return nil, err
 	}
-	results := normalizePansouResults(resp, keyword)
+	results := annotateNormalizedResults(normalizePansouResults(resp, keyword), target)
 	return map[string]any{
 		"query":    keyword,
 		"queries":  []string{keyword},
@@ -1907,7 +2023,7 @@ func searchMissingEpisode(s settings, missing missingEpisode) (map[string]any, e
 			"payload": payload,
 		})
 	}
-	results := dedupeNormalizedResults(allResults, 30)
+	results := annotateNormalizedResults(dedupeNormalizedResults(allResults, 30), scoreTarget{Season: missing.Season, Episodes: []int{missing.Episode}})
 	return map[string]any{
 		"query":    query,
 		"queries":  queries,
@@ -1935,6 +2051,7 @@ func normalizePansouResults(resp pansouSearchResp, query string) []normalizedRes
 				Datetime: item.Datetime,
 				Images:   item.Images,
 				Query:    query,
+				Note:     strings.TrimSpace(item.Note + " " + item.WorkTitle),
 			})
 		}
 	}
@@ -1954,6 +2071,7 @@ func normalizePansouResults(resp pansouSearchResp, query string) []normalizedRes
 					Datetime: firstNonEmpty(link.Datetime, result.Datetime),
 					Images:   result.Images,
 					Query:    query,
+					Note:     strings.TrimSpace(link.Note + " " + result.Title),
 				})
 			}
 		}
@@ -2673,7 +2791,7 @@ func tmdbGet(s settings, route string, query map[string]string, out any) error {
 		query = map[string]string{}
 	}
 	query["api_key"] = s.TMDBAPIKey
-	endpoint := buildBaseURL("https://api.themoviedb.org/3", route, query)
+	endpoint := buildBaseURL(tmdbBaseURL, route, query)
 	if err := requestJSON(http.MethodGet, endpoint, map[string]string{"Accept": "application/json"}, nil, out, 35*time.Second); err != nil {
 		return err
 	}
@@ -2962,6 +3080,36 @@ func compactStringSlice(values []string) []string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
 			out = append(out, strings.TrimSpace(value))
+		}
+	}
+	return out
+}
+
+// toStringList 兼容前端传数组或逗号分隔字符串两种写法。
+func toStringList(raw any) []string {
+	switch value := raw.(type) {
+	case nil:
+		return []string{}
+	case []string:
+		return compactStringSlice(value)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if text := strings.TrimSpace(anyToString(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return splitCommaList(anyToString(raw))
+	}
+}
+
+func splitCommaList(value string) []string {
+	out := make([]string, 0)
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '，' || r == '\n' || r == '\t' }) {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
 		}
 	}
 	return out
@@ -3668,6 +3816,8 @@ func handleMPSearch(w http.ResponseWriter, r *http.Request) {
 		Keyword       string `json:"keyword"`
 		TMDBID        string `json:"tmdbId"`
 		OriginalTitle string `json:"originalTitle"`
+		Season        int    `json:"season"`
+		Episodes      []int  `json:"episodes"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -3691,6 +3841,8 @@ func handleMPSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		allResults = append(allResults, r...)
 	}
+	target := scoreTarget{Season: body.Season, Episodes: body.Episodes}
+	allResults = annotateTorrentResults(allResults, target)
 	result := map[string]any{"results": allResults}
 	if len(errors) > 0 {
 		result["errors"] = errors

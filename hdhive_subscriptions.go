@@ -539,6 +539,8 @@ func handleHDHiveSearch(w http.ResponseWriter, r *http.Request) {
 		Keyword   string `json:"keyword"`
 		MediaType string `json:"mediaType"`
 		TMDBID    int    `json:"tmdbId"`
+		Season    int    `json:"season"`
+		Episodes  []int  `json:"episodes"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -549,6 +551,7 @@ func handleHDHiveSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err)
 		return
 	}
+	results = annotateNormalizedResults(results, scoreTarget{Season: body.Season, Episodes: body.Episodes})
 	writeJSON(w, http.StatusOK, map[string]any{"query": strings.TrimSpace(body.Keyword), "total": len(results), "results": results})
 }
 

@@ -7,7 +7,7 @@ import SearchResults from './SearchResults';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
 
-export default function MissingCard({ group, selectable = false, selected = false, onToggleSelect, onIgnore }) {
+export default function MissingCard({ group, selectable = false, selected = false, onToggleSelect, onIgnore, onIgnoreEpisode }) {
   const seriesKey = `series:${group.tmdbId || group.key}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
@@ -27,6 +27,18 @@ export default function MissingCard({ group, selectable = false, selected = fals
   const codeList = group.codes || [];
   const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
 
+  // 一部剧可能跨季缺集，取缺得最多的那一季作为搜索目标
+  const seasonBuckets = {};
+  for (const item of group.items || []) {
+    const season = item.season || 0;
+    if (!seasonBuckets[season]) seasonBuckets[season] = [];
+    if (item.episode) seasonBuckets[season].push(item.episode);
+  }
+  const seasonKeys = Object.keys(seasonBuckets).filter(k => Number(k) > 0);
+  seasonKeys.sort((a, b) => seasonBuckets[b].length - seasonBuckets[a].length);
+  const searchSeason = seasonKeys.length ? Number(seasonKeys[0]) : 0;
+  const searchEpisodes = searchSeason ? seasonBuckets[String(searchSeason)] : [];
+
   const rescanSeries = async () => {
     if (!group.embySeriesId) {
       toast.error('缺少 Emby 剧集 ID，无法单独扫描');
@@ -42,11 +54,34 @@ export default function MissingCard({ group, selectable = false, selected = fals
     }
   };
 
+  const ignoreEpisode = async (item) => {
+    if (!group.embySeriesId) return toast.error('缺少 Emby 剧集 ID，无法忽略单集');
+    try {
+      await api('/api/episode-ignores', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{
+            seriesId: group.embySeriesId,
+            seriesName: group.title,
+            season: item.season,
+            episode: item.episode,
+            code: item.code,
+            title: item.episodeName || '',
+          }],
+        }),
+      });
+      onIgnoreEpisode?.(item);
+      toast.success(`已忽略 ${item.code}`);
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
   const doSearch = async () => {
     setActiveSource('pan');
     setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes }));
     try {
-      const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: group.title }) });
+      const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: group.title, season: searchSeason, episodes: searchEpisodes }) });
       setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, results: data.results || [], query: data.query, codes }));
     } catch (err) {
       setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, error: err.message, codes }));
@@ -59,7 +94,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
     try {
       const data = await api('/api/hdhive/search', {
         method: 'POST',
-        body: JSON.stringify({ keyword: group.title, mediaType: 'tv', tmdbId: group.tmdbId || 0 }),
+        body: JSON.stringify({ keyword: group.title, mediaType: 'tv', tmdbId: group.tmdbId || 0, season: searchSeason, episodes: searchEpisodes }),
       });
       const previous = search?.results || [];
       setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, results: [...(prev?.results || previous), ...(data.results || [])], query: group.title, codes }));
@@ -74,7 +109,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
     if (group.tmdbId) keywords.unshift(`tmdb:${group.tmdbId}`);
     setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpKeywords: keywords }));
     try {
-      const body = { keyword: group.title };
+      const body = { keyword: group.title, season: searchSeason, episodes: searchEpisodes };
       if (group.tmdbId) body.tmdbId = String(group.tmdbId);
       const data = await api('/api/mp/search', { method: 'POST', body: JSON.stringify(body) });
       const arr = Array.isArray(data.results) ? data.results : [];
@@ -86,6 +121,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
         seeders: r.seeders || 0,
         source: r.site_name || r.site || '',
         pubdate: r.pubdate || '',
+        match: r.match || null,
         raw: r,
       }));
       setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpResults: items, query: group.title }));
@@ -101,6 +137,13 @@ export default function MissingCard({ group, selectable = false, selected = fals
   };
 
   const matchCode = (r) => {
+    // 后端已经解析过集号并打分，优先用它的判断
+    const m = r.match;
+    if (m) {
+      if (m.matchedEpisodes?.length) return 'match';
+      if (m.episodes?.length) return false;
+      if (m.seasonPack || m.seasonMatched) return 'include';
+    }
     const t = (r.title || '').toUpperCase();
     const d = (r.description || '').toUpperCase();
     const combined = t + ' ' + d;
@@ -124,6 +167,26 @@ export default function MissingCard({ group, selectable = false, selected = fals
   };
 
   const matchType = (r) => matchCode(r);
+
+  const MatchTags = ({ result }) => {
+    const m = result.match;
+    if (!m) return null;
+    const chips = [];
+    if (m.matchedEpisodes?.length) chips.push({ text: `命中 E${m.matchedEpisodes.join('/E')}`, tone: 'bg-emerald-100 text-emerald-700' });
+    else if (m.seasonPack) chips.push({ text: '整季包', tone: 'bg-amber-100 text-amber-700' });
+    if (m.free) chips.push({ text: '免费', tone: 'bg-blue-100 text-blue-700' });
+    else if (m.discount) chips.push({ text: m.discount, tone: 'bg-blue-50 text-blue-600' });
+    if (m.hitAndRun) chips.push({ text: 'H&R', tone: 'bg-red-100 text-red-700' });
+    for (const tag of m.tags || []) chips.push({ text: tag, tone: 'bg-gray-100 text-gray-600' });
+    if (!chips.length) return null;
+    return (
+      <div className="mt-1 flex flex-wrap gap-1">
+        {chips.map((chip, i) => (
+          <span key={i} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold ${chip.tone}`}>{chip.text}</span>
+        ))}
+      </div>
+    );
+  };
 
   const allMP = search?.mpResults || [];
   const totalPages = Math.max(1, Math.ceil(allMP.length / pageSize));
@@ -202,7 +265,15 @@ export default function MissingCard({ group, selectable = false, selected = fals
                   <span className="text-xs text-red-500 font-semibold">缺{missingEps}集</span>
                   {totalEps > 0 && <span className="text-xs text-gray-400">{ownedEps}/{totalEps}集 · {healthPct}%</span>}
                 </div>
-                <p className="text-xs text-gray-500 mt-1">缺失集号：{codes}</p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                  <span className="text-xs text-gray-500">缺失集号：</span>
+                  {(group.items || []).map(item => (
+                    <span key={item.id || item.code} className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-bold text-gray-600">
+                      {item.code}
+                      <button type="button" title="忽略这一集，扫描时不再列出" onClick={() => ignoreEpisode(item)} className="leading-none text-gray-300 hover:text-red-500">×</button>
+                    </span>
+                  ))}
+                </div>
               </div>
               <div className="shrink-0 flex items-center gap-1">
                 <button title="重新扫描此剧" onClick={rescanSeries} disabled={busy || !group.embySeriesId} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed">
@@ -262,6 +333,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
                                   <p className="text-sm font-medium text-gray-800"><span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1 ${mt === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{mt === 'include' ? '包含' : '✓'}</span>{r.title}</p>
                                   {r.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{r.description}</p>}
                                   <p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}{r.seeders ? ` · ${r.seeders}↑` : ''}</p>
+                                  <MatchTags result={r} />
                                 </div>
                                 <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
                               </div>
@@ -277,7 +349,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
                         {unmatchedMP.map((r, i) => (
                           <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
                             <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
+                              <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p><MatchTags result={r} /></div>
                               <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
                             </div>
                           </div>
@@ -290,7 +362,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
                           {unmatchedMP.map((r, i) => (
                             <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
                               <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p></div>
+                                <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p><MatchTags result={r} /></div>
                                 <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
                               </div>
                             </div>

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, CheckSquare, Square, ShieldCheck, X } from 'lucide-react';
+import { Radar, Tv, Film, AlertTriangle, Activity, Inbox, RefreshCw, CheckSquare, Square, ShieldCheck, X, ScanLine } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import MissingCard from '../components/MissingCard';
 import StatCard from '../components/StatCard';
@@ -18,16 +18,26 @@ export default function Missing() {
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({});
   const [exemptions, setExemptions] = useState({ manual: [], complete: [] });
+  const [episodeIgnores, setEpisodeIgnores] = useState([]);
   const [exemptionsOpen, setExemptionsOpen] = useState(false);
   const [exemptionTab, setExemptionTab] = useState('manual');
   const [selectedExemptions, setSelectedExemptions] = useState({});
+  const [verifying, setVerifying] = useState(false);
 
   const summary = scan?.summary || {};
   const diagnostics = scan?.diagnostics || {};
   const unmatchedSeries = scan?.unmatched?.series || [];
   const skippedSeries = diagnostics.skipped || [];
   const comparedSeries = diagnostics.compared || [];
-  const activeExemptions = exemptionTab === 'manual' ? exemptions.manual : exemptions.complete;
+  const episodeExemptions = episodeIgnores.map(item => ({
+    id: item.key,
+    name: `${item.seriesName || '未知剧集'} · ${item.code}`,
+    tmdbName: item.title || '',
+    episode: true,
+  }));
+  const activeExemptions = exemptionTab === 'manual' ? exemptions.manual
+    : exemptionTab === 'complete' ? exemptions.complete
+    : episodeExemptions;
 
   // Group + compute health
   const groups = {};
@@ -76,7 +86,36 @@ export default function Missing() {
     } catch {}
   };
 
-  useEffect(() => { loadExemptions(); }, []);
+  const loadEpisodeIgnores = async () => {
+    try {
+      const data = await api('/api/episode-ignores');
+      setEpisodeIgnores(data.items || []);
+    } catch {}
+  };
+
+  useEffect(() => { loadExemptions(); loadEpisodeIgnores(); }, []);
+
+  const verifyGaps = async () => {
+    setVerifying(true);
+    try {
+      const data = await api('/api/scan/verify', { method: 'POST' });
+      if (data.scan) setScan(data.scan);
+      toast.success(data.removed ? `已补齐 ${data.removed} 集，列表已更新` : '校验完成，缺集列表没有变化');
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const dropMissingEpisode = (item) => {
+    if (!scan) return;
+    setScan({
+      ...scan,
+      missing: (scan.missing || []).filter(m => !(m.embySeriesId === item.embySeriesId && m.season === item.season && m.episode === item.episode)),
+    });
+    loadEpisodeIgnores();
+  };
 
   const openExemptionModal = (tab = 'manual') => {
     setExemptionTab(tab);
@@ -153,8 +192,13 @@ export default function Missing() {
     const ids = items.map(i => i.id).filter(Boolean);
     if (!ids.length) return;
     try {
-      const data = await api('/api/exemptions/delete', { method: 'POST', body: JSON.stringify({ ids }) });
-      setExemptions({ manual: data.manual || [], complete: data.complete || [] });
+      if (exemptionTab === 'episode') {
+        const data = await api('/api/episode-ignores/delete', { method: 'POST', body: JSON.stringify({ keys: ids }) });
+        setEpisodeIgnores(data.items || []);
+      } else {
+        const data = await api('/api/exemptions/delete', { method: 'POST', body: JSON.stringify({ ids }) });
+        setExemptions({ manual: data.manual || [], complete: data.complete || [] });
+      }
       setSelectedExemptions({});
       toast.success('已从免检名单移除');
     } catch (err) {
@@ -205,9 +249,14 @@ export default function Missing() {
       </div>
 
       {/* Scan Button */}
-      <button onClick={() => startScan(false)} disabled={busy} className="btn-primary w-full flex items-center justify-center gap-2">
-        <Radar className="w-4 h-4" /> 全量扫描
-      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <button onClick={() => startScan(false)} disabled={busy} className="btn-primary sm:col-span-2 w-full flex items-center justify-center gap-2">
+          <Radar className="w-4 h-4" /> 全量扫描
+        </button>
+        <button onClick={verifyGaps} disabled={busy || verifying} title="只核对当前缺集是否已补齐，不重新比对 TMDB" className="btn-outline w-full flex items-center justify-center gap-2">
+          <ScanLine className={`w-4 h-4 ${verifying ? 'animate-pulse' : ''}`} /> {verifying ? '校验中...' : '快速校验'}
+        </button>
+      </div>
 
       <div onClick={() => openExemptionModal('manual')} className="card cursor-pointer space-y-4 transition-shadow hover:shadow-md">
         <div className="flex items-center justify-between gap-3">
@@ -217,14 +266,15 @@ export default function Missing() {
           </div>
           <div className="flex items-center gap-3">
             <div className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700">
-              共 {exemptions.manual.length + exemptions.complete.length} 项
+              共 {exemptions.manual.length + exemptions.complete.length + episodeIgnores.length} 项
             </div>
             <ShieldCheck className="h-5 w-5 text-emerald-500" />
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button type="button" onClick={(e) => { e.stopPropagation(); openExemptionModal('manual'); }} className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 hover:border-primary-300 hover:text-primary-600">手动忽略 · {exemptions.manual.length}</button>
           <button type="button" onClick={(e) => { e.stopPropagation(); openExemptionModal('complete'); }} className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 hover:border-primary-300 hover:text-primary-600">完结归档 · {exemptions.complete.length}</button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); openExemptionModal('episode'); }} className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs font-bold text-gray-600 hover:border-primary-300 hover:text-primary-600">单集忽略 · {episodeIgnores.length}</button>
         </div>
         <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
           点击卡片或上方分类按钮后，在弹窗中查看、勾选和批量移除名单。
@@ -248,6 +298,7 @@ export default function Missing() {
               <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => { setExemptionTab('manual'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'manual' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>手动忽略 · {exemptions.manual.length}</button>
                 <button type="button" onClick={() => { setExemptionTab('complete'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'complete' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>完结归档 · {exemptions.complete.length}</button>
+                <button type="button" onClick={() => { setExemptionTab('episode'); setSelectedExemptions({}); }} className={`rounded-md px-3 py-1.5 text-xs font-bold border ${exemptionTab === 'episode' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-200'}`}>单集忽略 · {episodeIgnores.length}</button>
               </div>
               {selectedExemptionItems.length > 0 && (
                 <div className="flex items-center justify-between rounded-lg border border-red-100 bg-red-50 px-3 py-2">
@@ -266,7 +317,7 @@ export default function Missing() {
                       </button>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-bold text-gray-900">{item.name}</p>
-                        <p className="text-xs text-gray-400">{item.tmdbName || item.tmdbId || '无 TMDB 信息'}</p>
+                        <p className="text-xs text-gray-400">{item.episode ? (item.tmdbName || '扫描时不再列出这一集') : (item.tmdbName || item.tmdbId || '无 TMDB 信息')}</p>
                       </div>
                       <button type="button" onClick={() => deleteExemptions([item])} className="shrink-0 text-xs font-bold text-red-500 hover:text-red-600">移除</button>
                     </div>
@@ -394,7 +445,7 @@ export default function Missing() {
         )}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
           {groupList.map(group => (
-            <MissingCard key={group.key} group={group} selectable={selectMode} selected={!!selected[group.embySeriesId]} onToggleSelect={toggleGroup} onIgnore={(g) => addGroupsToIgnore([g])} />
+            <MissingCard key={group.key} group={group} selectable={selectMode} selected={!!selected[group.embySeriesId]} onToggleSelect={toggleGroup} onIgnore={(g) => addGroupsToIgnore([g])} onIgnoreEpisode={dropMissingEpisode} />
           ))}
         </div>
       </div>

@@ -7,6 +7,10 @@ Go 后端 + React 前端，Docker 一键部署。
 ## 功能
 
 - **缺集扫描**：对接 Emby API，按 TMDB 官方季集信息比对，找出已播出但缺失的集数
+  - 全库单集一次性拉取 + 整季完整时跳过 TMDB 季详情，大库扫描请求数大幅下降
+  - 支持屏蔽指定媒体库、定时自动扫描、增量扫描（只重扫有变动的剧）
+  - 快速校验：只核对当前缺集是否已补齐，秒级刷新列表
+  - 免检名单支持整剧忽略、完结归档和单集忽略
 - **PanSou 盘搜**：聚合搜索 115 网盘资源，一键转存
 - **HDHive 订阅**：使用 Cookie 模式搜索 HDHive 115 资源，支持订阅自动扫描
 - **AI 识别**：接入 OpenAI 兼容接口，对订阅候选资源排序辅助识别
@@ -39,6 +43,7 @@ docker run -d --name emby-ecer -p 3000:3000 \
 
 登录后在「授权」页配置：
 - **Emby**：地址 + API Key
+- **缺集扫描**：定时扫描开关与间隔、增量模式、屏蔽不参与扫描的媒体库
 - **TMDB**：API Key
 - **PanSou**：API 地址（默认 https://so.252035.xyz）
 - **HDHive**：站点地址 + 网页 Cookie
@@ -50,6 +55,8 @@ docker run -d --name emby-ecer -p 3000:3000 \
 也可以全部通过环境变量注入。
 
 常用环境变量：
+- `SCAN_AUTO_ENABLED` / `SCAN_AUTO_INTERVAL_HOURS` / `SCAN_AUTO_RECENT_ONLY`：缺集定时扫描开关、间隔（默认 12 小时）与增量模式
+- `SCAN_EXCLUDED_LIBRARIES`：不参与缺集扫描的媒体库，填库 ID 或库名，逗号分隔
 - `PANSOU_URL` / `PANSOU_USERNAME` / `PANSOU_PASSWORD`：PanSou 开启认证时建议配置账号密码，token 过期后会自动重登
 - `HDHIVE_URL` / `HDHIVE_COOKIE`：HDHive Cookie 模式配置
 - `SUBSCRIPTION_ENABLED` / `SUBSCRIPTION_INTERVAL_HOURS` / `SUBSCRIPTION_AUTO_TRANSFER`：订阅自动扫描配置

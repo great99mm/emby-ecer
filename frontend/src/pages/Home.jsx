@@ -86,14 +86,25 @@ export default function Home() {
             <Clock className="w-4 h-4" />
             <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}{summary.scanMode === 'recent' ? ' · 最近变更模式' : summary.scanMode === 'full' ? ' · 全量增量模式' : ''}</span>
           </div>
-          <button
-            onClick={() => startJob('scan', false)}
-            disabled={busy}
-            className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
-          >
-            <Radar className="w-4 h-4" />
-            全量扫描
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button
+              onClick={() => startJob('scan', false)}
+              disabled={busy}
+              className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+            >
+              <Radar className="w-4 h-4" />
+              全量扫描
+            </button>
+            <button
+              onClick={() => startJob('scan', true)}
+              disabled={busy || !scannedAt}
+              title={scannedAt ? '只重扫上次扫描后有变动的剧集，其余沿用上次结果' : '先做一次全量扫描'}
+              className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
+            >
+              <RefreshCw className="w-4 h-4" />
+              增量扫描
+            </button>
+          </div>
         </div>
       </div>
 
