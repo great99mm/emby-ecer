@@ -45,16 +45,27 @@ func expandSelectedSeries(ids map[string]bool, groups map[int][]embyItem) {
 	}
 }
 
-func identityFingerprint(series embyItem, group []embyItem, airedOnly bool) string {
+func identityFingerprint(series embyItem, group []embyItem, airedOnly bool, ignores episodeIgnoreIndex) string {
 	if len(group) <= 1 {
-		return seriesFingerprint(series, airedOnly)
+		group = []embyItem{series}
 	}
 	parts := make([]string, 0, len(group))
+	ids := make([]string, 0, len(group))
 	for _, item := range group {
 		parts = append(parts, seriesFingerprint(item, airedOnly))
+		ids = append(ids, item.ID)
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, "\n")
+	ignored := []string{}
+	for _, id := range ids {
+		for key := range ignores[id] {
+			ignored = append(ignored, id+"|"+key)
+		}
+	}
+	sort.Strings(ignored)
+	// Adding or removing an ignore changes completeness, even if Emby did not
+	// change. The marker also invalidates caches created before this rule.
+	return strings.Join(parts, "\n") + "\nepisode-ignores:" + strings.Join(ignored, ",")
 }
 
 func mergedIdentityInventory(base *seriesInventory, seriesID string, group []embyItem, inventory map[string]*seriesInventory, tv tmdbTVDetail) (*seriesInventory, []string) {

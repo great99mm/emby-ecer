@@ -341,6 +341,30 @@ type episodeIgnoreStore struct {
 	data map[string]ignoredEpisode
 }
 
+type episodeIgnoreIndex map[string]map[string]bool
+
+// A scan uses one snapshot for both filtering and cache fingerprints.
+func (s *episodeIgnoreStore) Snapshot() episodeIgnoreIndex {
+	index := episodeIgnoreIndex{}
+	for _, item := range s.List() {
+		if index[item.SeriesID] == nil {
+			index[item.SeriesID] = map[string]bool{}
+		}
+		index[item.SeriesID][fmt.Sprintf("%d:%d", item.Season, item.Episode)] = true
+	}
+	return index
+}
+
+func (index episodeIgnoreIndex) ForSeries(ids []string) map[string]bool {
+	ignored := map[string]bool{}
+	for _, id := range ids {
+		for key := range index[id] {
+			ignored[key] = true
+		}
+	}
+	return ignored
+}
+
 var episodeIgnores *episodeIgnoreStore
 
 func episodeIgnoreKey(seriesID string, season, episode int) string {

@@ -1159,8 +1159,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	if incremental {
 		carriedMissing, carriedReviews, incremental = previousScanBySeries()
 	}
+	ignoreSnapshot := episodeIgnores.Snapshot()
 	fingerprint := func(series embyItem) string {
-		return identityFingerprint(series, identityGroups[parseInt(providerID(series.ProviderIDs, "tmdb"))], airedOnly)
+		return identityFingerprint(series, identityGroups[parseInt(providerID(series.ProviderIDs, "tmdb"))], airedOnly, ignoreSnapshot)
 	}
 	skipUnchanged := func(series embyItem) bool {
 		entry, ok := seriesScanCache.Get(series.ID)
@@ -1340,6 +1341,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				}
 			}
 		}
+		// Missing episodes are shared across compatible copies of a show, so an
+		// ignore on any contributing copy must apply to the same logical episode.
+		ignoredEpisodes := ignoreSnapshot.ForSeries(sourceIDs)
 		officialTitle := fallback(tv.Name, series.Name)
 		originalTitle := fallback(tv.OriginalName, fallback(series.OriginalTitle, series.Name))
 		localMissing := make([]missingEpisode, 0)
@@ -1393,7 +1397,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				}
 				isOwned := inv.has(season.SeasonNumber, ep.EpisodeNumber) || (ep.ID > 0 && inv.TMDBEpisodeIDs[ep.ID])
 				// 手动忽略的单集不参与统计，避免它一直把健康度压在 99%
-				if !isOwned && episodeIgnores.Has(series.ID, season.SeasonNumber, ep.EpisodeNumber) {
+				if !isOwned && ignoredEpisodes[fmt.Sprintf("%d:%d", season.SeasonNumber, ep.EpisodeNumber)] {
 					continue
 				}
 				totalTMDBCount++

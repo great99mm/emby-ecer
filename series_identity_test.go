@@ -66,7 +66,7 @@ func newIdentityFixture(t *testing.T, status string, inProduction bool) *identit
 	tmdb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tv/106449" {
 			count := 191
-			if f.status != "Ended" {
+			if f.status != "Ended" || f.newEpisodeAired.Load() {
 				count = 192
 			}
 			_ = json.NewEncoder(w).Encode(tmdbTVDetail{ID: 106449, Name: "凡人修仙传", Status: f.status, InProduction: f.inProduction, Seasons: []tmdbSeason{{SeasonNumber: 1, EpisodeCount: count}}})
@@ -210,5 +210,77 @@ func TestIdentityGroupsRespectExclusionsAndNumberingConflicts(t *testing.T) {
 	merged, sources := mergedIdentityInventory(base, "a", groups[101], map[string]*seriesInventory{"wrongOrder": alternate}, tmdbTVDetail{Seasons: []tmdbSeason{{SeasonNumber: 1, EpisodeCount: 2}}})
 	if merged.has(1, 2) || len(sources) != 1 {
 		t.Fatal("incompatible numbering supplied false canonical coverage")
+	}
+}
+
+func TestMergedEpisodeIgnoresSurviveRescansAndCanBeRemoved(t *testing.T) {
+	for _, status := range []string{"Returning Series", "Ended"} {
+		for _, mode := range []string{"full", "recent", "single"} {
+			t.Run(status+"/"+mode, func(t *testing.T) {
+				f := newIdentityFixture(t, status, status != "Ended")
+				f.newEpisodeAired.Store(true)
+				token := setupAPITest(t, f.settings)
+				// Neither another show nor another season may hide S01E192.
+				episodeIgnores.Add([]ignoredEpisode{
+					{SeriesID: "unrelated", Season: 1, Episode: 192},
+					{SeriesID: "b", Season: 2, Episode: 192},
+				})
+				scan := func(recent bool, id string) map[string]any {
+					t.Helper()
+					result, err := scanLibrary(f.settings, true, 0, recent, time.Now(), id, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := saveScanResult(result); err != nil {
+						t.Fatal(err)
+					}
+					return result
+				}
+				first := scan(false, "")
+				missing := first["missing"].([]missingEpisode)
+				if len(missing) != 1 || missing[0].Episode != 192 || !missing[0].MergedSeries {
+					t.Fatalf("expected one merged missing episode: %+v", missing)
+				}
+				item := missing[0]
+				response := apiTestRequest(t, token, http.MethodPost, "/api/episode-ignores", map[string]any{
+					"items": []ignoredEpisode{{SeriesID: item.EmbySeriesID, Season: item.Season, Episode: item.Episode}},
+				})
+				if response.Code != http.StatusOK {
+					t.Fatalf("ignore failed: %s", response.Body)
+				}
+				// Keep one removable rule, including after loading persisted settings.
+				episodeIgnores = newEpisodeIgnoreStore(episodeIgnores.path)
+				if got := len(episodeIgnores.List()); got != 3 {
+					t.Fatalf("ignore rule was duplicated across copies: %d rules", got)
+				}
+				selectedID := ""
+				if mode == "single" {
+					selectedID = "b"
+				}
+				for attempt := 0; attempt < 2; attempt++ {
+					result := scan(mode == "recent", selectedID)
+					if got := missingCodes(result); len(got) != 0 {
+						t.Fatalf("ignored %s on %s reappeared: %v", item.Code, item.EmbySeriesID, got)
+					}
+					for _, entry := range result["diagnostics"].(map[string]any)["compared"].([]scanCompareEntry) {
+						if entry.TMDBEpisodes != 191 || entry.OwnedEpisodes != 191 {
+							t.Fatalf("ignored episode still affects health: %+v", entry)
+						}
+					}
+				}
+				// Reload the archive as well: removing an ignore must invalidate it.
+				seriesScanCache = newSeriesScanCacheStore(seriesScanCache.path)
+				response = apiTestRequest(t, token, http.MethodPost, "/api/episode-ignores/delete", map[string]any{
+					"keys": []string{episodeIgnoreKey(item.EmbySeriesID, item.Season, item.Episode)},
+				})
+				if response.Code != http.StatusOK {
+					t.Fatalf("removing ignore failed: %s", response.Body)
+				}
+				restored := scan(mode == "recent", selectedID)["missing"].([]missingEpisode)
+				if len(restored) != 1 || restored[0].Episode != 192 || restored[0].TotalEpisodes != 192 {
+					t.Fatalf("removed ignore must restore the missing episode: %+v", restored)
+				}
+			})
+		}
 	}
 }
