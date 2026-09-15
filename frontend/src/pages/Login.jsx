@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { LogIn, Clapperboard } from 'lucide-react';
+import { LogIn, Radar, ArrowRight, Loader2 } from 'lucide-react';
+import RadarArt from '../components/RadarArt';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -31,8 +32,6 @@ export default function Login() {
         setSettings(settings);
         const scan = await api('/api/scan/last');
         if (scan?.scannedAt) useStore.getState().setScan(scan);
-        const saved = await api('/api/search-results');
-        if (Array.isArray(saved)) useStore.getState().applySearchResults(saved);
       } catch {}
       toast.success('登录成功');
       navigate('/');
@@ -44,47 +43,37 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-lg bg-primary-600 text-white mb-4">
-            <Clapperboard className="w-8 h-8" />
-          </div>
-          <h1 className="text-2xl font-extrabold text-gray-900">Emby 补片助手</h1>
-          <p className="mt-1 text-sm text-gray-500">115 缺集转存管理</p>
+    <div className="login-shell">
+      <aside className="login-story">
+        <div className="flex items-center gap-3"><span className="brand-symbol"><Radar size={23} /></span><span className="text-base font-semibold">Emby 补片助手</span></div>
+        <div className="relative py-16">
+          <div className="mb-10 hidden lg:block"><RadarArt /></div>
+          <p className="eyebrow mb-4">LESS MISSING. MORE WATCHING.</p>
+          <h1 className="text-4xl font-semibold leading-snug tracking-tight text-primary-900">让好故事，<br />每一集都完整。</h1>
+          <p className="mt-6 max-w-sm text-sm leading-8 text-primary-700/80">发现媒体库里的缺集，联动 MoviePilot 补齐。把时间留给值得看的故事。</p>
         </div>
-        <form onSubmit={handleSubmit} className="card space-y-4">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">用户名</label>
-            <input
-              type="text"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              placeholder="请输入用户名"
-              autoFocus
-              className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">密码</label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="请输入密码"
-              className="w-full rounded-md border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="btn-primary w-full flex items-center justify-center gap-2"
-          >
-            <LogIn className="w-4 h-4" />
-            {loading ? '登录中...' : '登录'}
-          </button>
-        </form>
-      </div>
+        <p className="flex flex-wrap items-center gap-3 text-xs text-primary-700/70"><span>扫描缺集</span><ArrowRight size={13} /><span>查找资源</span><ArrowRight size={13} /><span>补齐媒体库</span></p>
+      </aside>
+      <main className="login-form">
+        <div className="w-full max-w-[340px]">
+          <div className="mb-10 flex items-center gap-3 md:hidden"><span className="brand-symbol"><Radar size={23} /></span><span className="font-semibold">Emby 补片助手</span></div>
+          <p className="eyebrow mb-3">YOUR LIBRARY, COMPLETE</p>
+          <h2 className="text-[30px] font-semibold tracking-tight">欢迎回来</h2>
+          <p className="mb-8 mt-3 text-sm text-gray-500">登录你的缺集工作台，继续补齐好故事。</p>
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label htmlFor="username" className="mb-2 block text-sm font-medium">用户名</label>
+              <input id="username" name="username" autoComplete="username" type="text" value={username} onChange={e => setUsername(e.target.value)} placeholder="请输入用户名" autoFocus required className="field" />
+            </div>
+            <div>
+              <label htmlFor="password" className="mb-2 block text-sm font-medium">密码</label>
+              <input id="password" name="password" autoComplete="current-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="请输入密码" required className="field" />
+            </div>
+            <button type="submit" disabled={loading} className="btn-primary !mt-7 w-full">{loading ? <Loader2 size={16} className="animate-spin" /> : <LogIn size={16} />}{loading ? '登录中…' : '进入工作台'}</button>
+          </form>
+          <p className="mt-8 text-center text-xs text-gray-400">专注缺集扫描 · 联动 MoviePilot</p>
+        </div>
+      </main>
     </div>
   );
 }

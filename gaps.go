@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,6 +21,7 @@ type seriesInventory struct {
 	Owned          map[string]bool // "季:集"
 	Seasons        map[int]bool
 	SeasonOwned    map[int]int
+	SeasonMax      map[int]int
 	TMDBEpisodeIDs map[int]bool
 	Total          int
 }
@@ -29,6 +31,7 @@ func newSeriesInventory() *seriesInventory {
 		Owned:          map[string]bool{},
 		Seasons:        map[int]bool{},
 		SeasonOwned:    map[int]int{},
+		SeasonMax:      map[int]int{},
 		TMDBEpisodeIDs: map[int]bool{},
 	}
 }
@@ -53,6 +56,9 @@ func (inv *seriesInventory) add(ep embyEpisode) {
 			end = ep.IndexNumber
 		}
 		for number := ep.IndexNumber; number <= end; number++ {
+			if number > inv.SeasonMax[season] {
+				inv.SeasonMax[season] = number
+			}
 			key := fmt.Sprintf("%d:%d", season, number)
 			if !inv.Owned[key] {
 				inv.Owned[key] = true
@@ -78,6 +84,41 @@ func buildSeriesInventory(episodes []embyEpisode) *seriesInventory {
 		inv.add(ep)
 	}
 	return inv
+}
+
+// A count can hide gaps, duplicate versions, or an absolute episode order.
+func (inv *seriesInventory) coversSeason(season, count int) bool {
+	if inv == nil || count <= 0 || inv.SeasonOwned[season] < count {
+		return false
+	}
+	for episode := 1; episode <= count; episode++ {
+		if !inv.has(season, episode) {
+			return false
+		}
+	}
+	return true
+}
+
+func numberingReview(inv *seriesInventory, tv tmdbTVDetail) (int, string) {
+	counts := map[int]int{}
+	total := 0
+	for _, season := range tv.Seasons {
+		if season.SeasonNumber > 0 && season.EpisodeCount > 0 {
+			counts[season.SeasonNumber] = season.EpisodeCount
+			total += season.EpisodeCount
+		}
+	}
+	seasons := make([]int, 0, len(inv.Seasons))
+	for season := range inv.Seasons {
+		seasons = append(seasons, season)
+	}
+	sort.Ints(seasons)
+	for _, season := range seasons {
+		if inv.SeasonMax[season] > counts[season] {
+			return total, fmt.Sprintf("编号待确认：Emby 有 %d 集、%d 季，第 %d 季集号到 %d；TMDB 有 %d 集、%d 季，第 %d 季记录 %d 集。季集编号不能直接对应，暂不计算缺集。", inv.Total, len(inv.Seasons), season, inv.SeasonMax[season], total, len(counts), season, counts[season])
+		}
+	}
+	return total, ""
 }
 
 const episodeInventoryFields = "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,IndexNumberEnd,LocationType,IsMissing"
@@ -462,13 +503,14 @@ func removeEpisodesFromSavedScanResult(items []ignoredEpisode) {
 	_ = saveScanResult(result)
 }
 
-// previousMissingBySeries 读取上次扫描结果并按剧集分组，
+// previousScanBySeries 读取上次扫描结果并按剧集分组，
 // 供最近变更模式沿用未变化剧集的缺集记录。
-func previousMissingBySeries() map[string][]missingEpisode {
+func previousScanBySeries() (map[string][]missingEpisode, map[string]scanCompareEntry, bool) {
 	out := map[string][]missingEpisode{}
+	reviews := map[string]scanCompareEntry{}
 	result, err := loadScanResult()
 	if err != nil || result == nil {
-		return out
+		return out, reviews, false
 	}
 	for _, item := range anySlice(result["missing"]) {
 		var entry missingEpisode
@@ -489,7 +531,16 @@ func previousMissingBySeries() map[string][]missingEpisode {
 		}
 		out[seriesID] = append(out[seriesID], entry)
 	}
-	return out
+	if diagnostics, ok := result["diagnostics"].(map[string]any); ok {
+		for _, item := range anySlice(diagnostics["review"]) {
+			raw, _ := json.Marshal(item)
+			var entry scanCompareEntry
+			if json.Unmarshal(raw, &entry) == nil && entry.ID != "" {
+				reviews[entry.ID] = entry
+			}
+		}
+	}
+	return out, reviews, result["scannerVersion"] == seriesScanCacheVersion
 }
 
 func missingItemKey(item any) (string, int, int) {
@@ -525,6 +576,10 @@ func handleVerifyScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func verifyMissingEpisodes(s settings) (int, map[string]any, error) {
+	if !scanExecutionMu.TryLock() {
+		return 0, nil, badRequest("已有扫描任务正在运行，请等待完成")
+	}
+	defer scanExecutionMu.Unlock()
 	result, err := loadScanResult()
 	if err != nil || result == nil {
 		return 0, nil, badRequest("还没有扫描结果，请先扫描一次媒体库")
@@ -536,6 +591,31 @@ func verifyMissingEpisodes(s settings) (int, map[string]any, error) {
 	inventory, err := loadEpisodeInventory(s, nil)
 	if err != nil {
 		return 0, nil, err
+	}
+	// Bulk Series IDs split Emby's merged show views. Recheck only the merged
+	// shows present in this missing list through Emby's authoritative show API.
+	mergedIDs := map[string]bool{}
+	for _, item := range items {
+		var entry missingEpisode
+		switch value := item.(type) {
+		case missingEpisode:
+			entry = value
+		case map[string]any:
+			entry = bodyToMissing(value)
+		}
+		if entry.MergedSeries {
+			mergedIDs[entry.EmbySeriesID] = true
+		}
+	}
+	if len(mergedIDs) > 0 {
+		excluded := excludedLibraryItems(s)
+		for id := range mergedIDs {
+			episodes, err := loadSeriesEpisodes(s, id, nil)
+			if err != nil {
+				return 0, nil, badRequest("读取同剧版本失败，请稍后重试")
+			}
+			inventory[id] = buildSeriesInventory(excludeSeriesEpisodes(episodes, excluded))
+		}
 	}
 	kept := make([]any, 0, len(items))
 	removed := 0
@@ -625,10 +705,12 @@ func startScanScheduler() {
 			} else if time.Since(last) < interval {
 				continue
 			}
-			j := jobMgr.create("scan")
-			activateScanJob(j.ID)
+			j, created := startScanJob()
+			if !created {
+				continue
+			}
 			log.Printf("自动缺集扫描启动（间隔 %d 小时，模式 %s）", clampIntervalHours(s.ScanAutoInterval), scanModeLabel(s.ScanAutoRecentOnly))
-			go runJob(j.ID, s, "scan", true, 0, s.ScanAutoRecentOnly, "")
+			go runJob(j.ID, s, true, 0, s.ScanAutoRecentOnly, "")
 		}
 	}()
 }
@@ -1006,20 +1088,6 @@ func annotateTorrentResults(results []map[string]any, target scoreTarget) []map[
 		out = append(out, entry.item)
 	}
 	return out
-}
-
-// annotateNormalizedResults 给网盘/影巢结果打分排序，逻辑与种子一致但没有促销字段。
-func annotateNormalizedResults(results []normalizedResult, target scoreTarget) []normalizedResult {
-	if len(target.Episodes) == 0 && target.Season <= 0 {
-		return results
-	}
-	for i := range results {
-		score := scoreResource(results[i].Title, results[i].Note, target)
-		results[i].Match = &score
-		results[i].MatchScore = score.Score
-	}
-	sort.SliceStable(results, func(i, j int) bool { return results[i].MatchScore > results[j].MatchScore })
-	return results
 }
 
 func minInt(a, b int) int {

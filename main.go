@@ -25,8 +25,7 @@ import (
 )
 
 const (
-	defaultPanSouURL       = "https://so.252035.xyz"
-	seriesScanCacheVersion = "complete-series-archive-v1"
+	seriesScanCacheVersion = "library-identity-ended-v3"
 )
 
 // tmdbBaseURL 是变量而非常量，便于测试指向本地 mock
@@ -39,15 +38,10 @@ var (
 	store           *settingsStore
 	seriesScanCache *seriesScanCacheStore
 	activeScanMu    sync.Mutex
+	scanStartMu     sync.Mutex
+	scanExecutionMu sync.Mutex
 	activeScanJobID string
 	httpCli         = &http.Client{Timeout: 45 * time.Second}
-	subStore        *subscriptionStore
-
-	pansouToken = struct {
-		sync.Mutex
-		Token     string
-		ExpiresAt time.Time
-	}{}
 
 	jobMgr *jobManager
 )
@@ -75,9 +69,10 @@ type job struct {
 }
 
 type jobManager struct {
-	mu   sync.RWMutex
-	path string
-	jobs map[string]*job
+	mu          sync.RWMutex
+	path        string
+	jobs        map[string]*job
+	lastPersist time.Time
 }
 
 type persistedJobState struct {
@@ -92,7 +87,7 @@ func newJobManager(path string) *jobManager {
 	}
 	if err := loadStateJSON("jobs", path, &state); err == nil {
 		for id, item := range state.Jobs {
-			if item == nil || strings.TrimSpace(id) == "" {
+			if item == nil || item.Type != "scan" || strings.TrimSpace(id) == "" {
 				continue
 			}
 			cloned := cloneJob(item)
@@ -138,7 +133,11 @@ func (m *jobManager) update(id string, fn func(*job)) {
 		fn(j)
 		j.UpdatedAt = time.Now()
 		m.cleanupLocked()
-		_ = m.persistLocked()
+		// Keep progress in memory; checkpoint large partial results at most every
+		// 30 seconds. Completion and errors must still be durable immediately.
+		if j.Status == jobDone || j.Status == jobError || time.Since(m.lastPersist) >= 30*time.Second {
+			_ = m.persistLocked()
+		}
 	}
 }
 
@@ -167,7 +166,11 @@ func (m *jobManager) persistLocked() error {
 		}
 		state.Jobs[id] = cloneJob(item)
 	}
-	return saveStateJSON("jobs", m.path, state)
+	if err := saveStateJSON("jobs", m.path, state); err != nil {
+		return err
+	}
+	m.lastPersist = time.Now()
+	return nil
 }
 
 func cloneJob(in *job) *job {
@@ -233,25 +236,8 @@ type settings struct {
 	ScanAutoInterval   int      `json:"scanAutoInterval"`
 	ScanAutoRecentOnly bool     `json:"scanAutoRecentOnly"`
 
-	PansouURL       string `json:"pansouUrl"`
-	PansouUsername  string `json:"pansouUsername"`
-	PansouPassword  string `json:"pansouPassword"`
-	PansouToken     string `json:"pansouToken"`
-	P115Cookie      string `json:"p115Cookie"`
-	P115TargetCID   string `json:"p115TargetCid"`
-	MPUrl           string `json:"mpUrl"`
-	MPToken         string `json:"mpToken"`
-	HDHiveURL       string `json:"hdhiveUrl"`
-	HDHiveUsername  string `json:"hdhiveUsername"`
-	HDHivePassword  string `json:"hdhivePassword"`
-	HDHiveCookie    string `json:"hdhiveCookie"`
-	SubEnabled      bool   `json:"subEnabled"`
-	SubInterval     int    `json:"subInterval"`
-	SubAutoTransfer bool   `json:"subAutoTransfer"`
-	SubWebhookToken string `json:"subWebhookToken"`
-	OpenAIBaseURL   string `json:"openaiBaseUrl"`
-	OpenAIAPIKey    string `json:"openaiApiKey"`
-	OpenAIModel     string `json:"openaiModel"`
+	MPUrl   string `json:"mpUrl"`
+	MPToken string `json:"mpToken"`
 }
 
 type settingsStore struct {
@@ -261,17 +247,20 @@ type settingsStore struct {
 }
 
 type seriesScanCacheEntry struct {
-	Fingerprint string           `json:"fingerprint"`
-	Matched     bool             `json:"matched"`
-	Missing     []missingEpisode `json:"missing,omitempty"`
-	Unmatched   *unmatchedMedia  `json:"unmatched,omitempty"`
-	Name        string           `json:"name,omitempty"`
-	TMDBID      int              `json:"tmdbId,omitempty"`
-	TMDBName    string           `json:"tmdbName,omitempty"`
-	TMDBYear    string           `json:"tmdbYear,omitempty"`
-	Manual      bool             `json:"manual,omitempty"`
-	Complete    bool             `json:"complete,omitempty"`
-	UpdatedAt   int64            `json:"updatedAt"`
+	SeriesStatus string           `json:"seriesStatus,omitempty"`
+	InProduction bool             `json:"inProduction,omitempty"`
+	Verification string           `json:"verification,omitempty"`
+	Fingerprint  string           `json:"fingerprint"`
+	Matched      bool             `json:"matched"`
+	Missing      []missingEpisode `json:"missing,omitempty"`
+	Unmatched    *unmatchedMedia  `json:"unmatched,omitempty"`
+	Name         string           `json:"name,omitempty"`
+	TMDBID       int              `json:"tmdbId,omitempty"`
+	TMDBName     string           `json:"tmdbName,omitempty"`
+	TMDBYear     string           `json:"tmdbYear,omitempty"`
+	Manual       bool             `json:"manual,omitempty"`
+	Complete     bool             `json:"complete,omitempty"`
+	UpdatedAt    int64            `json:"updatedAt"`
 }
 
 type seriesScanCacheStore struct {
@@ -303,9 +292,7 @@ func main() {
 	store = newSettingsStore(configPath)
 	seriesScanCache = newSeriesScanCacheStore(getenv("SERIES_SCAN_CACHE_PATH", filepath.Join(filepath.Dir(configPath), "series-scan-cache.json")))
 	jobMgr = newJobManager(getenv("JOB_STATE_PATH", filepath.Join(filepath.Dir(configPath), "jobs.json")))
-	subStore = newSubscriptionStore(getenv("SUBSCRIPTIONS_PATH", filepath.Join(filepath.Dir(configPath), "subscriptions.json")))
 	episodeIgnores = newEpisodeIgnoreStore(getenv("EPISODE_IGNORES_PATH", filepath.Join(filepath.Dir(configPath), "episode-ignores.json")))
-	startSubscriptionScheduler()
 	startScanScheduler()
 
 	port := getenv("PORT", "3000")
@@ -315,8 +302,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("Emby 115 Helper (Go) running at http://localhost:%s", port)
-	log.Printf("Default PanSou: %s", store.Get().PansouURL)
+	log.Printf("Emby Ecer running at http://localhost:%s", port)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -338,16 +324,12 @@ func route(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	if path == "/api/health" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "Emby 115 Missing Helper", "runtime": "go", "time": time.Now().Format(time.RFC3339)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": "Emby Ecer", "runtime": "go", "time": time.Now().Format(time.RFC3339)})
 		return
 	}
 
 	if path == "/api/auth/login" && r.Method == http.MethodPost {
 		handleLogin(w, r)
-		return
-	}
-	if path == "/api/subscriptions/webhook" && r.Method == http.MethodPost {
-		handleSubscriptionWebhook(w, r)
 		return
 	}
 
@@ -388,48 +370,22 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		clearPanSouTokenCache()
 		writeJSON(w, http.StatusOK, maskSettings(next))
 
 	case r.URL.Path == "/api/settings/test" && r.Method == http.MethodPost:
 		var body struct {
-			Target string `json:"target"`
+			Target   string         `json:"target"`
+			Settings map[string]any `json:"settings"`
 		}
-		_ = readJSON(r, &body)
+		if err := readJSON(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 		if body.Target == "" {
 			body.Target = "all"
 		}
-		writeJSON(w, http.StatusOK, testConnection(body.Target, store.Get()))
-
-	case r.URL.Path == "/api/tmdb/search" && r.Method == http.MethodPost:
-		handleTMDBSearch(w, r)
-
-	case r.URL.Path == "/api/hdhive/search" && r.Method == http.MethodPost:
-		handleHDHiveSearch(w, r)
-
-	case r.URL.Path == "/api/hdhive/login" && r.Method == http.MethodPost:
-		handleHDHiveLogin(w, r)
-
-	case r.URL.Path == "/api/hdhive/checkin" && r.Method == http.MethodPost:
-		handleHDHiveCheckin(w, r)
-
-	case r.URL.Path == "/api/hdhive/unlock" && r.Method == http.MethodPost:
-		handleHDHiveUnlock(w, r)
-
-	case r.URL.Path == "/api/subscriptions" && r.Method == http.MethodGet:
-		handleListSubscriptions(w, r)
-
-	case r.URL.Path == "/api/subscriptions" && r.Method == http.MethodPost:
-		handleSaveSubscription(w, r)
-
-	case r.URL.Path == "/api/subscriptions/delete" && r.Method == http.MethodPost:
-		handleDeleteSubscription(w, r)
-
-	case r.URL.Path == "/api/subscriptions/archive" && r.Method == http.MethodPost:
-		handleArchiveSubscriptions(w, r)
-
-	case r.URL.Path == "/api/subscriptions/run" && r.Method == http.MethodPost:
-		handleRunSubscriptions(w, r)
+		draft := settingsWithOverrides(store.Get(), body.Settings)
+		writeJSON(w, http.StatusOK, testConnection(body.Target, draft))
 
 	case r.URL.Path == "/api/scan/last" && r.Method == http.MethodGet:
 		result, err := loadScanResult()
@@ -438,14 +394,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
-
-	case r.URL.Path == "/api/search-results" && r.Method == http.MethodGet:
-		results, err := loadSearchResults()
-		if err != nil {
-			writeJSON(w, http.StatusOK, []any{})
-			return
-		}
-		writeJSON(w, http.StatusOK, results)
 
 	case r.URL.Path == "/api/scan" && r.Method == http.MethodPost:
 		var body struct {
@@ -462,54 +410,11 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			writeError(w, statusFromError(err), err)
 			return
 		}
+		ids := parseSeriesIDSet(joinSeriesIDs(body.SeriesID, body.SeriesIDs))
+		if len(ids) > 0 {
+			result = mergeSelectedSeriesScanResult(selectedResultIDs(ids, result), result)
+		}
 		_ = saveScanResult(result)
-		writeJSON(w, http.StatusOK, result)
-
-	case r.URL.Path == "/api/search" && r.Method == http.MethodPost:
-		var body struct {
-			Keyword  string `json:"keyword"`
-			Season   int    `json:"season"`
-			Episodes []int  `json:"episodes"`
-		}
-		if err := readJSON(r, &body); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		result, err := searchKeywordScored(store.Get(), body.Keyword, scoreTarget{Season: body.Season, Episodes: body.Episodes})
-		if err != nil {
-			writeError(w, statusFromError(err), err)
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-
-	case r.URL.Path == "/api/search-missing" && r.Method == http.MethodPost:
-		var body searchMissingRequest
-		if err := readJSON(r, &body); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		missing := body.Missing
-		if missing.Query == "" {
-			missing = bodyToMissing(body.Raw)
-		}
-		result, err := searchMissingEpisode(store.Get(), missing)
-		if err != nil {
-			writeError(w, statusFromError(err), err)
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-
-	case r.URL.Path == "/api/115/transfer" && r.Method == http.MethodPost:
-		var body transferRequest
-		if err := readJSON(r, &body); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		result, err := transfer115(store.Get(), body)
-		if err != nil {
-			writeError(w, statusFromError(err), err)
-			return
-		}
 		writeJSON(w, http.StatusOK, result)
 
 	case r.URL.Path == "/api/scan/verify" && r.Method == http.MethodPost:
@@ -571,12 +476,6 @@ func newSettingsStore(path string) *settingsStore {
 	if err := loadStateJSON("settings", path, &saved); err == nil {
 		data = saved
 	}
-	if strings.TrimSpace(data.PansouURL) == "" {
-		data.PansouURL = defaultPanSouURL
-	}
-	if strings.TrimSpace(data.P115TargetCID) == "" {
-		data.P115TargetCID = "0"
-	}
 	data.ScanConcurrency = clampScanConcurrency(data.ScanConcurrency)
 	return &settingsStore{path: path, data: data}
 }
@@ -594,25 +493,8 @@ func settingsFromEnv() settings {
 		ScanAutoInterval:   clampIntervalHours(getenvInt("SCAN_AUTO_INTERVAL_HOURS", 12)),
 		ScanAutoRecentOnly: getenvBool("SCAN_AUTO_RECENT_ONLY", true),
 
-		PansouURL:       getenv("PANSOU_URL", defaultPanSouURL),
-		PansouUsername:  os.Getenv("PANSOU_USERNAME"),
-		PansouPassword:  os.Getenv("PANSOU_PASSWORD"),
-		PansouToken:     os.Getenv("PANSOU_TOKEN"),
-		P115Cookie:      os.Getenv("P115_COOKIE"),
-		P115TargetCID:   getenv("P115_TARGET_CID", "0"),
-		MPUrl:           os.Getenv("MP_URL"),
-		MPToken:         os.Getenv("MP_TOKEN"),
-		HDHiveURL:       getenv("HDHIVE_URL", defaultHDHiveURL),
-		HDHiveUsername:  os.Getenv("HDHIVE_USERNAME"),
-		HDHivePassword:  os.Getenv("HDHIVE_PASSWORD"),
-		HDHiveCookie:    os.Getenv("HDHIVE_COOKIE"),
-		SubEnabled:      getenvBool("SUBSCRIPTION_ENABLED", false),
-		SubInterval:     getenvInt("SUBSCRIPTION_INTERVAL_HOURS", 6),
-		SubAutoTransfer: getenvBool("SUBSCRIPTION_AUTO_TRANSFER", false),
-		SubWebhookToken: os.Getenv("SUBSCRIPTION_WEBHOOK_TOKEN"),
-		OpenAIBaseURL:   getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
-		OpenAIModel:     getenv("OPENAI_MODEL", "gpt-4o-mini"),
+		MPUrl:   os.Getenv("MP_URL"),
+		MPToken: os.Getenv("MP_TOKEN"),
 	}
 }
 
@@ -626,7 +508,13 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	next := s.data
+	next := settingsWithOverrides(s.data, input)
+	s.data = next
+	return next, saveStateJSON("settings", s.path, next)
+}
+
+// settingsWithOverrides applies form values without changing stored settings.
+func settingsWithOverrides(next settings, input map[string]any) settings {
 	setPlain := func(field string, apply func(string)) {
 		if raw, ok := input[field]; ok {
 			apply(strings.TrimSpace(fmt.Sprint(raw)))
@@ -659,105 +547,11 @@ func (s *settingsStore) Update(input map[string]any) (settings, error) {
 	setPlain("scanAutoEnabled", func(v string) { next.ScanAutoEnabled = parseBool(v) })
 	setPlain("scanAutoInterval", func(v string) { next.ScanAutoInterval = clampIntervalHours(parseInt(v)) })
 	setPlain("scanAutoRecentOnly", func(v string) { next.ScanAutoRecentOnly = parseBool(v) })
-	setPlain("pansouUrl", func(v string) {
-		if v == "" {
-			v = defaultPanSouURL
-		}
-		next.PansouURL = strings.TrimRight(v, "/")
-	})
-	setPlain("pansouUsername", func(v string) { next.PansouUsername = v })
-	setSecret("pansouPassword", func(v string) { next.PansouPassword = v })
-	setSecret("pansouToken", func(v string) { next.PansouToken = v })
-	setSecret("p115Cookie", func(v string) { next.P115Cookie = v })
-	setPlain("p115TargetCid", func(v string) {
-		if v == "" {
-			v = "0"
-		}
-		next.P115TargetCID = v
-	})
 	setPlain("mpUrl", func(v string) { next.MPUrl = strings.TrimRight(v, "/") })
 	setSecret("mpToken", func(v string) { next.MPToken = v })
-	setPlain("hdhiveUrl", func(v string) {
-		if v == "" {
-			v = defaultHDHiveURL
-		}
-		next.HDHiveURL = strings.TrimRight(v, "/")
-	})
-	setPlain("hdhiveUsername", func(v string) { next.HDHiveUsername = v })
-	setSecret("hdhivePassword", func(v string) { next.HDHivePassword = v })
-	setSecret("hdhiveCookie", func(v string) { next.HDHiveCookie = v })
-	setPlain("subEnabled", func(v string) { next.SubEnabled = parseBool(v) })
-	setPlain("subInterval", func(v string) { next.SubInterval = clampIntervalHours(parseInt(v)) })
-	setPlain("subAutoTransfer", func(v string) { next.SubAutoTransfer = parseBool(v) })
-	setSecret("subWebhookToken", func(v string) { next.SubWebhookToken = v })
-	setPlain("openaiBaseUrl", func(v string) {
-		if v == "" {
-			v = "https://api.openai.com/v1"
-		}
-		next.OpenAIBaseURL = strings.TrimRight(v, "/")
-	})
-	setSecret("openaiApiKey", func(v string) { next.OpenAIAPIKey = v })
-	setPlain("openaiModel", func(v string) { next.OpenAIModel = v })
-
-	if next.PansouURL == "" {
-		next.PansouURL = defaultPanSouURL
-	}
-	if next.P115TargetCID == "" {
-		next.P115TargetCID = "0"
-	}
-	if next.HDHiveURL == "" {
-		next.HDHiveURL = defaultHDHiveURL
-	}
-	if next.OpenAIBaseURL == "" {
-		next.OpenAIBaseURL = "https://api.openai.com/v1"
-	}
-	if next.OpenAIModel == "" {
-		next.OpenAIModel = "gpt-4o-mini"
-	}
-	next.SubInterval = clampIntervalHours(next.SubInterval)
 	next.ScanConcurrency = clampScanConcurrency(next.ScanConcurrency)
 
-	s.data = next
-	return next, saveStateJSON("settings", s.path, next)
-}
-
-func (s *settingsStore) UpdateHDHiveCookie(cookie string) error {
-	cookie = strings.TrimSpace(cookie)
-	if cookie == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cookie == strings.TrimSpace(s.data.HDHiveCookie) {
-		return nil
-	}
-	s.data.HDHiveCookie = cookie
-	return saveStateJSON("settings", s.path, s.data)
-}
-
-func (s *settingsStore) UpdateHDHiveAuth(username, password, cookie string) error {
-	username = strings.TrimSpace(username)
-	password = strings.TrimSpace(password)
-	cookie = strings.TrimSpace(cookie)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	changed := false
-	if username != "" && username != s.data.HDHiveUsername {
-		s.data.HDHiveUsername = username
-		changed = true
-	}
-	if password != "" && password != s.data.HDHivePassword {
-		s.data.HDHivePassword = password
-		changed = true
-	}
-	if cookie != "" && cookie != strings.TrimSpace(s.data.HDHiveCookie) {
-		s.data.HDHiveCookie = cookie
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	return saveStateJSON("settings", s.path, s.data)
+	return next
 }
 
 func maskSettings(s settings) map[string]any {
@@ -773,34 +567,12 @@ func maskSettings(s settings) map[string]any {
 		"scanAutoInterval":   clampIntervalHours(s.ScanAutoInterval),
 		"scanAutoRecentOnly": s.ScanAutoRecentOnly,
 
-		"pansouUrl":       s.PansouURL,
-		"pansouUsername":  s.PansouUsername,
-		"pansouPassword":  maskSecret(s.PansouPassword, 4),
-		"pansouToken":     maskSecret(s.PansouToken, 4),
-		"p115Cookie":      maskSecret(s.P115Cookie, 12),
-		"p115TargetCid":   fallback(s.P115TargetCID, "0"),
-		"mpUrl":           s.MPUrl,
-		"mpToken":         maskSecret(s.MPToken, 4),
-		"hdhiveUrl":       fallback(s.HDHiveURL, defaultHDHiveURL),
-		"hdhiveUsername":  s.HDHiveUsername,
-		"hdhivePassword":  maskSecret(s.HDHivePassword, 4),
-		"hdhiveCookie":    maskSecret(s.HDHiveCookie, 12),
-		"subEnabled":      s.SubEnabled,
-		"subInterval":     clampIntervalHours(s.SubInterval),
-		"subAutoTransfer": s.SubAutoTransfer,
-		"subWebhookToken": maskSecret(s.SubWebhookToken, 4),
-		"openaiBaseUrl":   fallback(s.OpenAIBaseURL, "https://api.openai.com/v1"),
-		"openaiApiKey":    maskSecret(s.OpenAIAPIKey, 4),
-		"openaiModel":     fallback(s.OpenAIModel, "gpt-4o-mini"),
+		"mpUrl":   s.MPUrl,
+		"mpToken": maskSecret(s.MPToken, 4),
 		"ready": map[string]bool{
-			"emby":       s.EmbyURL != "" && s.EmbyAPIKey != "",
-			"tmdb":       s.TMDBAPIKey != "",
-			"pansou":     s.PansouURL != "",
-			"p115":       s.P115Cookie != "",
-			"mp":         s.MPUrl != "" && s.MPToken != "",
-			"hdhive":     s.HDHiveURL != "" && (s.HDHiveCookie != "" || s.HDHiveUsername != "" && s.HDHivePassword != ""),
-			"llm":        s.OpenAIBaseURL != "" && s.OpenAIAPIKey != "" && s.OpenAIModel != "",
-			"subWebhook": s.SubWebhookToken != "",
+			"emby": s.EmbyURL != "" && s.EmbyAPIKey != "",
+			"tmdb": s.TMDBAPIKey != "",
+			"mp":   s.MPUrl != "" && s.MPToken != "",
 		},
 	}
 }
@@ -826,7 +598,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	body.Username = strings.TrimSpace(body.Username)
 	appUsersMu.RLock()
-	pwdOk := appUsers[body.Username] == body.Password
+	password, exists := appUsers[body.Username]
+	pwdOk := exists && password != "" && body.Password != "" && hmac.Equal([]byte(password), []byte(body.Password))
 	appUsersMu.RUnlock()
 	if body.Username == "" || !pwdOk {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "用户名或密码错误"})
@@ -987,18 +760,6 @@ func requireFields(s settings, fields ...string) error {
 			if s.TMDBAPIKey == "" {
 				missing = append(missing, field)
 			}
-		case "pansouUrl":
-			if s.PansouURL == "" {
-				missing = append(missing, field)
-			}
-		case "p115Cookie":
-			if s.P115Cookie == "" {
-				missing = append(missing, field)
-			}
-		case "hdhiveCookie":
-			if s.HDHiveCookie == "" {
-				missing = append(missing, field)
-			}
 		}
 	}
 	if len(missing) > 0 {
@@ -1007,175 +768,8 @@ func requireFields(s settings, fields ...string) error {
 	return nil
 }
 
-func testConnection(target string, s settings) map[string]any {
-	targets := []string{target}
-	if target == "all" {
-		targets = []string{"emby", "tmdb", "pansou", "p115", "hdhive", "llm"}
-	}
-	result := map[string]any{}
-	for _, item := range targets {
-		switch item {
-		case "emby":
-			if err := requireFields(s, "embyUrl", "embyApiKey"); err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			var info map[string]any
-			err := embyGet(s, "/System/Info", nil, &info)
-			if err != nil {
-				result[item] = failResult(err)
-			} else {
-				payload := map[string]any{"ok": true, "name": firstString(info, "ServerName", "FriendlyName", "LocalAddress")}
-				if strings.TrimSpace(s.EmbyUserID) != "" {
-					if err := validateEmbyUserID(s); err != nil {
-						payload["warning"] = "Emby UserId 不可用，扫描会自动回退到全局 /Items：" + err.Error()
-					} else {
-						payload["userId"] = s.EmbyUserID
-					}
-				}
-				result[item] = payload
-			}
-		case "tmdb":
-			if err := requireFields(s, "tmdbApiKey"); err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			var info map[string]any
-			err := tmdbGet(s, "/configuration", nil, &info)
-			if err != nil {
-				result[item] = failResult(err)
-			} else {
-				result[item] = map[string]any{"ok": true}
-			}
-		case "pansou":
-			if err := requireFields(s, "pansouUrl"); err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			var info map[string]any
-			err := requestJSON(http.MethodGet, buildBaseURL(s.PansouURL, "/api/health", nil), nil, nil, &info, 20*time.Second)
-			if err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			if authEnabled, _ := info["auth_enabled"].(bool); authEnabled {
-				if err := testPanSouAuth(s); err != nil {
-					result[item] = failResult(err)
-					continue
-				}
-			}
-			result[item] = map[string]any{"ok": true, "auth_enabled": info["auth_enabled"], "plugins": info["plugin_count"]}
-		case "p115":
-			if err := requireFields(s, "p115Cookie"); err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			var info map[string]any
-			err := requestJSON(http.MethodGet, "https://webapi.115.com/files/index_info", headers115(s.P115Cookie, false), nil, &info, 20*time.Second)
-			if err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			if state, _ := info["state"].(bool); !state {
-				result[item] = failResult(errors.New(getErrorMessage(info, "Cookie 无效")))
-			} else {
-				result[item] = map[string]any{"ok": true, "name": "115 用户"}
-			}
-		case "hdhive":
-			if err := requireHDHiveAuth(s); err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			client, err := newAuthenticatedHDHiveClient(s)
-			if err != nil {
-				result[item] = failResult(err)
-				continue
-			}
-			defer syncHDHiveCookie(client)
-			info, err := client.CheckConnection()
-			if err != nil {
-				result[item] = failResult(err)
-			} else {
-				result[item] = map[string]any{"ok": true, "name": firstString(info, "nickname", "username"), "points": info["points"]}
-			}
-		case "llm":
-			if s.OpenAIBaseURL == "" || s.OpenAIAPIKey == "" || s.OpenAIModel == "" {
-				result[item] = failResult(errors.New("请先配置 OpenAI 兼容 Base URL、API Key 和模型"))
-				continue
-			}
-			if err := testOpenAICompatible(s); err != nil {
-				result[item] = failResult(err)
-			} else {
-				result[item] = map[string]any{"ok": true, "model": s.OpenAIModel}
-			}
-		}
-	}
-	return result
-}
-
 func failResult(err error) map[string]any {
 	return map[string]any{"ok": false, "error": err.Error()}
-}
-
-func handleTMDBSearch(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Query     string `json:"query"`
-		MediaType string `json:"mediaType"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	results, err := searchTMDBForSubscriptions(store.Get(), body.Query, body.MediaType)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"query": strings.TrimSpace(body.Query), "results": results})
-}
-
-func searchTMDBForSubscriptions(s settings, query, mediaType string) ([]map[string]any, error) {
-	if err := requireFields(s, "tmdbApiKey"); err != nil {
-		return nil, err
-	}
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, badRequest("请输入要搜索的标题")
-	}
-	mediaType = normalizeHDHiveMediaType(mediaType)
-	route := "/search/tv"
-	if mediaType == "movie" {
-		route = "/search/movie"
-	}
-	var resp tmdbSearchResp
-	if err := tmdbGet(s, route, map[string]string{"query": query, "language": "zh-CN", "include_adult": "false"}, &resp); err != nil {
-		return nil, err
-	}
-	out := make([]map[string]any, 0, len(resp.Results))
-	for _, item := range resp.Results {
-		title := firstNonEmpty(item.Name, item.Title, item.OriginalName, item.OriginalTitle)
-		date := firstNonEmpty(item.FirstAirDate, item.ReleaseDate)
-		if title == "" || item.ID <= 0 {
-			continue
-		}
-		out = append(out, map[string]any{
-			"tmdbId":        item.ID,
-			"title":         title,
-			"originalTitle": firstNonEmpty(item.OriginalName, item.OriginalTitle),
-			"mediaType":     mediaType,
-			"year":          firstYear(date),
-			"date":          date,
-			"posterPath":    item.PosterPath,
-			"backdropPath":  item.BackdropPath,
-			"overview":      item.Overview,
-			"voteAverage":   item.VoteAverage,
-			"tmdbUrl":       fmt.Sprintf("https://www.themoviedb.org/%s/%d", mediaType, item.ID),
-		})
-		if len(out) >= 12 {
-			break
-		}
-	}
-	return out, nil
 }
 
 type embyItemsResp struct {
@@ -1239,6 +833,8 @@ type tmdbFindResp struct {
 }
 
 type tmdbTVDetail struct {
+	Status       string       `json:"status"`
+	InProduction bool         `json:"in_production"`
 	ID           int          `json:"id"`
 	Name         string       `json:"name"`
 	OriginalName string       `json:"original_name"`
@@ -1267,6 +863,7 @@ type tmdbEpisodeDetail struct {
 }
 
 type missingEpisode struct {
+	MergedSeries  bool   `json:"mergedSeries,omitempty"`
 	ID            string `json:"id"`
 	MediaType     string `json:"mediaType"`
 	EmbySeriesID  string `json:"embySeriesId"`
@@ -1309,20 +906,28 @@ type scanDiagnosticEntry struct {
 }
 
 type scanCompareEntry struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	TMDBID          int    `json:"tmdbId"`
-	TMDBName        string `json:"tmdbName"`
-	TMDBYear        string `json:"tmdbYear"`
-	EmbyEpisodes    int    `json:"embyEpisodes"`
-	EmbySeasonCount int    `json:"embySeasonCount"`
-	TMDBEpisodes    int    `json:"tmdbEpisodes"`
-	OwnedEpisodes   int    `json:"ownedEpisodes"`
-	MissingEpisodes int    `json:"missingEpisodes"`
-	Reason          string `json:"reason"`
+	SeriesStatus    string            `json:"seriesStatus,omitempty"`
+	SourceSeriesIDs []string          `json:"sourceSeriesIds,omitempty"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	TMDBID          int               `json:"tmdbId"`
+	TMDBName        string            `json:"tmdbName"`
+	TMDBYear        string            `json:"tmdbYear"`
+	EmbyEpisodes    int               `json:"embyEpisodes"`
+	EmbySeasonCount int               `json:"embySeasonCount"`
+	TMDBEpisodes    int               `json:"tmdbEpisodes"`
+	OwnedEpisodes   int               `json:"ownedEpisodes"`
+	MissingEpisodes int               `json:"missingEpisodes"`
+	NeedsReview     bool              `json:"needsReview,omitempty"`
+	LocalOrder      *localOrderReport `json:"localOrder,omitempty"`
+	Reason          string            `json:"reason"`
 }
 
 func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, changedSince time.Time, onlySeriesID string, onProgress func(processed, total int, message, current string, snapshot map[string]any)) (map[string]any, error) {
+	if !scanExecutionMu.TryLock() {
+		return nil, errors.New("已有扫描任务正在运行，请等待完成")
+	}
+	defer scanExecutionMu.Unlock()
 	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
 		return nil, err
 	}
@@ -1340,6 +945,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		return nil, err
 	}
 	excludedItems := excludedLibraryItems(s)
+	identityGroups := seriesIdentityGroups(allItems, excludedItems)
+	expandSelectedSeries(onlySeriesIDs, identityGroups)
 	for _, item := range allItems {
 		if excludedItems[item.ID] {
 			continue
@@ -1368,8 +975,29 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		}
 	}()
 
+	scannedIDs := make([]string, 0, len(seriesItems))
+	for _, item := range seriesItems {
+		scannedIDs = append(scannedIDs, item.ID)
+	}
 	var mu sync.Mutex
 	missing := make([]missingEpisode, 0)
+	missingIndex := map[string]int{}
+	appendMissing := func(items []missingEpisode) {
+		for _, item := range items {
+			key := fmt.Sprintf("%d:%d:%d", item.TMDBID, item.Season, item.Episode)
+			if item.TMDBID <= 0 {
+				key = item.EmbySeriesID + ":" + key
+			}
+			if index, ok := missingIndex[key]; ok {
+				if item.EmbySeriesID < missing[index].EmbySeriesID {
+					missing[index] = item
+				}
+				continue
+			}
+			missingIndex[key] = len(missing)
+			missing = append(missing, item)
+		}
+	}
 	unmatchedSeries := make([]unmatchedMedia, 0)
 	unmatchedMovies := make([]unmatchedMedia, 0)
 	matchedSeries := 0
@@ -1378,7 +1006,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	rescannedSeries := 0
 	skippedSeries := make([]scanDiagnosticEntry, 0)
 	comparedSeries := make([]scanCompareEntry, 0)
-	totalWork := len(seriesItems)*3 + len(movieItems)
+	reviewSeries := make([]scanCompareEntry, 0)
+	totalWork := len(seriesItems) * 3
 	workDone := 0
 	currentSeriesIDs := map[string]bool{}
 	if fullSeriesScan {
@@ -1391,24 +1020,31 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	}
 	buildSnapshot := func() (int, int, map[string]any) {
 		mu.Lock()
-		defer mu.Unlock()
+		mode := scanModeLabel(recentOnly)
+		if len(onlySeriesIDs) > 0 {
+			mode = "single"
+		}
 		missingCopy := append([]missingEpisode(nil), missing...)
 		seriesCopy := append([]unmatchedMedia(nil), unmatchedSeries...)
 		movieCopy := append([]unmatchedMedia(nil), unmatchedMovies...)
 		skippedCopy := append([]scanDiagnosticEntry(nil), skippedSeries...)
 		comparedCopy := append([]scanCompareEntry(nil), comparedSeries...)
-		sortMissingEpisodes(missingCopy)
-		return workDone, totalWork, map[string]any{
-			"scannedAt": time.Now().Format(time.RFC3339),
+		reviewCopy := append([]scanCompareEntry(nil), reviewSeries...)
+		processed, total := workDone, totalWork
+		snapshot := map[string]any{
+			"scannerVersion":   seriesScanCacheVersion,
+			"scannedSeriesIds": scannedIDs,
+			"scannedAt":        time.Now().Format(time.RFC3339),
 			"summary": map[string]any{
 				"seriesTotal":          seriesTotal,
 				"seriesScanned":        len(seriesItems),
 				"seriesCached":         cachedSeries,
 				"seriesRescanned":      rescannedSeries,
-				"scanMode":             scanModeLabel(recentOnly),
+				"scanMode":             mode,
 				"movieTotal":           movieTotal,
 				"matchedSeries":        matchedSeries,
 				"unmatchedSeries":      len(unmatchedSeries),
+				"seriesNeedsReview":    len(reviewSeries),
 				"matchedMovies":        matchedMovies,
 				"unmatchedMovies":      len(unmatchedMovies),
 				"totalMissingEpisodes": len(missing),
@@ -1422,6 +1058,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				"skippedCount":    len(skippedSeries),
 				"skipped":         limitScanDiagnostics(skippedCopy, 120),
 				"compared":        limitCompareDiagnostics(comparedCopy, 500),
+				"review":          reviewCopy,
 			},
 			"missing": missingCopy,
 			"unmatched": map[string]any{
@@ -1429,6 +1066,9 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				"movies": limitUnmatched(movieCopy, 80),
 			},
 		}
+		mu.Unlock()
+		sortMissingEpisodes(missingCopy)
+		return processed, total, snapshot
 	}
 	adjustTotal := func(delta int) {
 		if delta <= 0 {
@@ -1438,6 +1078,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		totalWork += delta
 		mu.Unlock()
 	}
+	var progressMu sync.Mutex
+	var lastProgress time.Time
 	advanceProgress := func(delta int, message, current string) {
 		if delta > 0 {
 			mu.Lock()
@@ -1447,6 +1089,16 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		if onProgress == nil {
 			return
 		}
+		// Do not copy/sort the entire growing result for each episode or season.
+		// TryLock also keeps other scan workers moving while a checkpoint is saved.
+		if !progressMu.TryLock() {
+			return
+		}
+		defer progressMu.Unlock()
+		if time.Since(lastProgress) < 2*time.Second {
+			return
+		}
+		lastProgress = time.Now()
 		processed, total, snapshot := buildSnapshot()
 		onProgress(processed, total, message, current, snapshot)
 	}
@@ -1454,11 +1106,22 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 
 	// 最近变更模式：Emby 侧没动过的剧直接沿用上次结果，不再跑 TMDB 比对
 	carriedMissing := map[string][]missingEpisode{}
+	carriedReviews := map[string]scanCompareEntry{}
 	incremental := recentOnly && !changedSince.IsZero() && len(onlySeriesIDs) == 0
 	if incremental {
-		carriedMissing = previousMissingBySeries()
+		carriedMissing, carriedReviews, incremental = previousScanBySeries()
+	}
+	fingerprint := func(series embyItem) string {
+		return identityFingerprint(series, identityGroups[parseInt(providerID(series.ProviderIDs, "tmdb"))], airedOnly)
 	}
 	skipUnchanged := func(series embyItem) bool {
+		entry, ok := seriesScanCache.Get(series.ID)
+		if !ok || (!entry.Manual && (entry.SeriesStatus != "Ended" || entry.InProduction || entry.Fingerprint != fingerprint(series))) {
+			return false
+		}
+		if entry, ok := carriedReviews[series.ID]; ok && entry.LocalOrder == nil {
+			return false
+		}
 		return incremental && !itemChangedSince(series, changedSince)
 	}
 	pendingSeriesCount := 0
@@ -1467,7 +1130,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			continue
 		}
 		if len(onlySeriesIDs) == 0 && !recentOnly {
-			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
+			if entry, ok := seriesScanCache.Get(series.ID); ok && automaticArchiveValid(entry, fingerprint(series)) {
 				continue
 			}
 		}
@@ -1477,7 +1140,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	// 一次性拉全库单集，替代逐剧请求；只有一两部剧要扫时，逐剧读取更划算
 	inventory := map[string]*seriesInventory{}
 	useInventory := false
-	if pendingSeriesCount > 1 {
+	if pendingSeriesCount > 1 && pendingSeriesCount*4 >= seriesTotal {
 		advanceProgress(0, "正在拉取全库单集缓存...", "初始化")
 		loaded, invErr := loadEpisodeInventory(s, func(page, seriesCount int) {
 			advanceProgress(0, fmt.Sprintf("正在拉取全库单集缓存（第 %d 页 / 已覆盖 %d 部剧）...", page, seriesCount), "初始化")
@@ -1502,10 +1165,6 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		mu.Unlock()
 	}
 	seriesWorkers := clampScanConcurrency(s.ScanConcurrency)
-	movieWorkers := seriesWorkers
-	if movieWorkers > 2 {
-		movieWorkers = maxInt(2, seriesWorkers/2)
-	}
 
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
@@ -1514,7 +1173,10 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			mu.Lock()
 			matchedSeries++
 			cachedSeries++
-			missing = append(missing, carried...)
+			appendMissing(carried)
+			if entry, ok := carriedReviews[series.ID]; ok {
+				reviewSeries = append(reviewSeries, entry)
+			}
 			mu.Unlock()
 			addSkipped(series, "unchanged", fmt.Sprintf("自上次扫描以来 Emby 侧无变化，沿用上次结果（%d 集缺失）", len(carried)))
 			advanceProgress(3, fmt.Sprintf("《%s》自上次扫描无变化，跳过", title), title)
@@ -1522,7 +1184,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		}
 		forceRescanSeries := len(onlySeriesIDs) > 0 || recentOnly
 		if !forceRescanSeries {
-			if entry, ok := seriesScanCache.Get(series.ID); ok && entry.Complete {
+			if entry, ok := seriesScanCache.Get(series.ID); ok && automaticArchiveValid(entry, fingerprint(series)) {
 				mu.Lock()
 				matchedSeries++
 				cachedSeries++
@@ -1554,6 +1216,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		advanceProgress(1, fmt.Sprintf("已匹配《%s》的 TMDB 信息", title), title)
 
 		var inv *seriesInventory
+		var seriesEpisodes []embyEpisode
 		if useInventory {
 			if cached, ok := inventory[series.ID]; ok {
 				inv = cached
@@ -1562,10 +1225,12 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			}
 			advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
 		} else {
-			seriesEpisodes, err := loadSeriesEpisodes(s, series.ID, func(page, count int) {
+			var err error
+			seriesEpisodes, err = loadSeriesEpisodes(s, series.ID, func(page, count int) {
 				adjustTotal(1)
 				advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
 			})
+			seriesEpisodes = excludeSeriesEpisodes(seriesEpisodes, excludedItems)
 			if err != nil {
 				unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
 				mu.Lock()
@@ -1589,12 +1254,50 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			return
 		}
 		advanceProgress(1, fmt.Sprintf("开始比对《%s》的季集信息", title), title)
+		if total, reason := numberingReview(inv, tv); reason != "" {
+			// Load original filenames only for incompatible orders. The fast full
+			// inventory remains small, and source URLs never enter saved results.
+			var localOrder *localOrderReport
+			if useInventory {
+				seriesEpisodes, err = loadSeriesEpisodes(s, series.ID, nil)
+				seriesEpisodes = excludeSeriesEpisodes(seriesEpisodes, excludedItems)
+			}
+			if err == nil {
+				localOrder = inspectLocalOrder(seriesEpisodes)
+			} else {
+				localOrder = &localOrderReport{Issue: "读取原始文件编号失败，请单剧重扫后再检查。"}
+			}
+			mu.Lock()
+			matchedSeries++
+			reviewSeries = append(reviewSeries, scanCompareEntry{
+				ID: series.ID, Name: series.Name, TMDBID: resolved,
+				TMDBName: fallback(tv.Name, series.Name), TMDBYear: firstYear(tv.FirstAirDate),
+				EmbyEpisodes: inv.Total, EmbySeasonCount: len(inv.Seasons),
+				TMDBEpisodes: total, NeedsReview: true, LocalOrder: localOrder, Reason: reason,
+			})
+			mu.Unlock()
+			seriesScanCache.Delete(series.ID)
+			return
+		}
+		group := identityGroups[resolved]
+		sourceIDs := []string{series.ID}
+		if useInventory && len(group) > 1 {
+			inv, sourceIDs = mergedIdentityInventory(inv, series.ID, group, inventory, tv)
+			embySeasons = inv.Seasons
+		} else if len(group) > 1 {
+			// Emby already returns its merged logical show through /Shows/id/Episodes.
+			for _, item := range group {
+				if item.ID != series.ID {
+					sourceIDs = append(sourceIDs, item.ID)
+				}
+			}
+		}
 		officialTitle := fallback(tv.Name, series.Name)
 		originalTitle := fallback(tv.OriginalName, fallback(series.OriginalTitle, series.Name))
 		localMissing := make([]missingEpisode, 0)
 		totalTMDBCount := 0
 		ownedCount := 0
-		cacheable := true
+		cacheable := tv.Status == "Ended" && !tv.InProduction
 		seasonWork := 0
 		for _, season := range tv.Seasons {
 			if season.SeasonNumber > 0 && season.EpisodeCount > 0 {
@@ -1606,8 +1309,8 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			if season.SeasonNumber <= 0 || season.EpisodeCount <= 0 {
 				continue
 			}
-			// 本季已有集数不少于 TMDB 记录的总集数，直接判定完整，省掉一次季详情请求
-			if inv.SeasonOwned[season.SeasonNumber] >= season.EpisodeCount {
+			// Only skip details when every expected episode number is present.
+			if inv.coversSeason(season.SeasonNumber, season.EpisodeCount) {
 				totalTMDBCount += season.EpisodeCount
 				ownedCount += season.EpisodeCount
 				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季已完整，跳过 TMDB 比对", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
@@ -1637,6 +1340,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 					continue
 				}
 				if airedOnly && ep.AirDate != "" && ep.AirDate > time.Now().Format("2006-01-02") {
+					cacheable = false
 					continue
 				}
 				isOwned := inv.has(season.SeasonNumber, ep.EpisodeNumber) || (ep.ID > 0 && inv.TMDBEpisodeIDs[ep.ID])
@@ -1657,6 +1361,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				localMissing = append(localMissing, missingEpisode{
 					ID:            fmt.Sprintf("%d-%d-%d", resolved, season.SeasonNumber, ep.EpisodeNumber),
 					MediaType:     "episode",
+					MergedSeries:  len(sourceIDs) > 1,
 					EmbySeriesID:  series.ID,
 					EmbyTitle:     series.Name,
 					TMDBID:        resolved,
@@ -1696,7 +1401,15 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		} else if ownedCount >= totalTMDBCount {
 			compareReason = "Emby 读取到的季集号/TMDB 集 ID 已覆盖 TMDB 已播出集数"
 		}
+		if len(localMissing) == 0 && totalTMDBCount > 0 && tv.Status != "Ended" {
+			compareReason = "当前已播出内容已齐；尚未确认完结，后续继续检查更新"
+		}
+		if len(sourceIDs) > 1 {
+			compareReason = fmt.Sprintf("已合并核对 %d 条同剧记录；", len(sourceIDs)) + compareReason
+		}
 		addCompared(scanCompareEntry{
+			SeriesStatus:    tv.Status,
+			SourceSeriesIDs: sourceIDs,
 			ID:              series.ID,
 			Name:            series.Name,
 			TMDBID:          resolved,
@@ -1712,33 +1425,32 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 
 		mu.Lock()
 		matchedSeries++
-		missing = append(missing, localMissing...)
+		appendMissing(localMissing)
 		mu.Unlock()
-		if cacheable && len(localMissing) == 0 {
-			seriesScanCache.Set(series.ID, seriesScanCacheEntry{Matched: true, Complete: true, Name: series.Name, TMDBID: resolved, TMDBName: officialTitle, TMDBYear: firstYear(tv.FirstAirDate), UpdatedAt: time.Now().Unix()})
-		} else {
-			seriesScanCache.Delete(series.ID)
-		}
+		seriesScanCache.Set(series.ID, seriesScanCacheEntry{
+			Verification: seriesScanCacheVersion, Fingerprint: fingerprint(series), Matched: true,
+			SeriesStatus: tv.Status, InProduction: tv.InProduction,
+			Complete: cacheable && totalTMDBCount > 0 && len(localMissing) == 0,
+			Name:     series.Name, TMDBID: resolved, TMDBName: officialTitle, TMDBYear: firstYear(tv.FirstAirDate), UpdatedAt: time.Now().Unix(),
+		})
 	})
 
-	parallelFor(movieItems, movieWorkers, func(movie embyItem) {
-		title := fallback(movie.Name, "未知电影")
-		resolved, err := resolveTmdbMovie(s, movie)
-		mu.Lock()
-		if err != nil || resolved == 0 {
-			unmatchedMovies = append(unmatchedMovies, simpleMedia(movie, "找不到 TMDB 电影 ID"))
-			mu.Unlock()
-			advanceProgress(1, fmt.Sprintf("扫描电影《%s》时未找到 TMDB 电影 ID", title), title)
-			return
+	// Movies have no missing episodes. Retain library counts without thousands
+	// of unrelated TMDB detail/search requests after the series scan.
+	for _, movie := range movieItems {
+		if parseInt(providerID(movie.ProviderIDs, "tmdb")) > 0 {
+			matchedMovies++
+		} else {
+			unmatchedMovies = append(unmatchedMovies, simpleMedia(movie, "Emby 未提供 TMDB 电影 ID"))
 		}
-		matchedMovies++
-		mu.Unlock()
-		advanceProgress(1, fmt.Sprintf("已完成电影《%s》比对", title), title)
-	})
+	}
 	if fullSeriesScan {
 		seriesScanCache.Prune(currentSeriesIDs)
 	}
-	_, _, result := buildSnapshot()
+	processed, total, result := buildSnapshot()
+	if onProgress != nil {
+		onProgress(processed, total, "媒体库比对完成", "完成", result)
+	}
 	return result, nil
 }
 
@@ -1836,464 +1548,9 @@ func tmdbFindExternal(s settings, externalID, source string, tv bool) (int, erro
 	return 0, nil
 }
 
-type searchMissingRequest struct {
-	Missing missingEpisode         `json:"missing"`
-	Raw     map[string]interface{} `json:"-"`
-}
-
-func (r *searchMissingRequest) UnmarshalJSON(data []byte) error {
-	type alias searchMissingRequest
-	var a alias
-	_ = json.Unmarshal(data, &a)
-	var raw map[string]interface{}
-	_ = json.Unmarshal(data, &raw)
-	*r = searchMissingRequest(a)
-	r.Raw = raw
-	return nil
-}
-
-type pansouSearchResp struct {
-	Total        int                         `json:"total"`
-	MergedByType map[string][]pansouLinkItem `json:"merged_by_type"`
-	Results      []pansouResult              `json:"results"`
-}
-
-// PanSou 统一响应信封：{code, message, data: {...}}
-type pansouEnvelope struct {
-	Code    int              `json:"code"`
-	Message string           `json:"message"`
-	Data    pansouSearchResp `json:"data"`
-}
-
-func unmarshalPansouResp(raw []byte, resp *pansouSearchResp) error {
-	// 先尝试带 data 信封的格式
-	var env pansouEnvelope
-	if err := json.Unmarshal(raw, &env); err == nil && env.Data.Total > 0 {
-		*resp = env.Data
-		return nil
-	}
-	// 兜底：直接解析到顶层字段（兼容旧版/其他部署）
-	return json.Unmarshal(raw, resp)
-}
-
-type pansouLinkItem struct {
-	Type      string   `json:"type"`
-	URL       string   `json:"url"`
-	Password  string   `json:"password"`
-	Note      string   `json:"note"`
-	Datetime  string   `json:"datetime"`
-	Source    string   `json:"source"`
-	Images    []string `json:"images"`
-	WorkTitle string   `json:"work_title"`
-	Title     string   `json:"title"`
-}
-
-type pansouResult struct {
-	Title    string           `json:"title"`
-	Channel  string           `json:"channel"`
-	Datetime string           `json:"datetime"`
-	Images   []string         `json:"images"`
-	Links    []pansouLinkItem `json:"links"`
-}
-
-type normalizedResult struct {
-	Title        string         `json:"title"`
-	URL          string         `json:"url"`
-	Password     string         `json:"password"`
-	Source       string         `json:"source"`
-	Datetime     string         `json:"datetime"`
-	Images       []string       `json:"images"`
-	Query        string         `json:"query"`
-	Note         string         `json:"note,omitempty"`
-	Match        *resourceScore `json:"match,omitempty"`
-	MatchScore   int            `json:"matchScore,omitempty"`
-	HDHiveSlug   string         `json:"hdhiveSlug,omitempty"`
-	HDHiveLocked bool           `json:"hdhiveLocked,omitempty"`
-	UnlockPoints int            `json:"unlockPoints,omitempty"`
-}
-
-func searchKeyword(s settings, keyword string) (map[string]any, error) {
-	return searchKeywordScored(s, keyword, scoreTarget{})
-}
-
-func searchKeywordScored(s settings, keyword string, target scoreTarget) (map[string]any, error) {
-	if err := requireFields(s, "pansouUrl"); err != nil {
-		return nil, err
-	}
-	keyword = strings.TrimSpace(keyword)
-	if keyword == "" {
-		return nil, badRequest("缺少搜索关键词")
-	}
-	payload := map[string]any{
-		"kw":          keyword,
-		"res":         "merge",
-		"src":         "all",
-		"cloud_types": []string{"115"},
-		"filter": map[string]any{
-			"include": []string{},
-			"exclude": []string{},
-		},
-	}
-	headers, err := pansouAuthHeaders(s)
-	if err != nil {
-		return nil, err
-	}
-	headers["Content-Type"] = "application/json"
-	endpoint := buildBaseURL(s.PansouURL, "/api/search", nil)
-	var raw json.RawMessage
-	if err := pansouRequestJSON(s, http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
-		return nil, err
-	}
-	var resp pansouSearchResp
-	if err := unmarshalPansouResp(raw, &resp); err != nil {
-		return nil, err
-	}
-	results := annotateNormalizedResults(normalizePansouResults(resp, keyword), target)
-	return map[string]any{
-		"query":    keyword,
-		"queries":  []string{keyword},
-		"total":    len(results),
-		"results":  results,
-		"rawTotal": resp.Total,
-		"requests": []map[string]any{{
-			"method":  "POST",
-			"url":     endpoint,
-			"payload": payload,
-		}},
-	}, nil
-}
-
-func searchMissingEpisode(s settings, missing missingEpisode) (map[string]any, error) {
-	if err := requireFields(s, "pansouUrl"); err != nil {
-		return nil, err
-	}
-	query := strings.TrimSpace(missing.Query)
-	if query == "" && missing.OfficialTitle != "" && missing.Season > 0 && missing.Episode > 0 {
-		query = fmt.Sprintf("%s S%02dE%02d", missing.OfficialTitle, missing.Season, missing.Episode)
-	}
-	if query == "" {
-		return nil, badRequest("缺少搜索关键词")
-	}
-	code := missing.Code
-	if code == "" && missing.Season > 0 && missing.Episode > 0 {
-		code = fmt.Sprintf("S%02dE%02d", missing.Season, missing.Episode)
-	}
-
-	headers, err := pansouAuthHeaders(s)
-	if err != nil {
-		return nil, err
-	}
-	headers["Content-Type"] = "application/json"
-	endpoint := buildBaseURL(s.PansouURL, "/api/search", nil)
-
-	queries := []string{query}
-	if titleOnly := strings.TrimSpace(missing.OfficialTitle); titleOnly != "" && !stringSliceContains(queries, titleOnly) {
-		queries = append(queries, titleOnly)
-	}
-
-	requests := make([]map[string]any, 0, len(queries))
-	allResults := make([]normalizedResult, 0)
-	rawTotal := 0
-	for _, kw := range queries {
-		payload := map[string]any{
-			"kw":          kw,
-			"res":         "merge",
-			"src":         "all",
-			"cloud_types": []string{"115"},
-			"filter": map[string]any{
-				"include": compactStringSlice([]string{code}),
-				"exclude": []string{},
-			},
-			"ext": map[string]any{"title_en": missing.OriginalTitle, "is_all": true},
-		}
-		var raw json.RawMessage
-		if err := pansouRequestJSON(s, http.MethodPost, endpoint, headers, payload, &raw, 8*time.Second); err != nil {
-			return nil, err
-		}
-		var resp pansouSearchResp
-		if err := unmarshalPansouResp(raw, &resp); err != nil {
-			return nil, err
-		}
-		rawTotal += resp.Total
-		results := normalizePansouResults(resp, kw)
-		allResults = append(allResults, results...)
-		requests = append(requests, map[string]any{
-			"method":  "POST",
-			"url":     endpoint,
-			"payload": payload,
-		})
-	}
-	results := annotateNormalizedResults(dedupeNormalizedResults(allResults, 30), scoreTarget{Season: missing.Season, Episodes: []int{missing.Episode}})
-	return map[string]any{
-		"query":    query,
-		"queries":  queries,
-		"total":    len(results),
-		"results":  results,
-		"rawTotal": rawTotal,
-		"requests": requests,
-	}, nil
-}
-
-func normalizePansouResults(resp pansouSearchResp, query string) []normalizedResult {
-	items := make([]normalizedResult, 0)
-
-	// 优先从 merged_by_type 取（遍历所有 key，不再限定 "115"/"oneonefive"）
-	for _, list := range resp.MergedByType {
-		for _, item := range list {
-			if !is115Link(item.URL) {
-				continue
-			}
-			items = append(items, normalizedResult{
-				Title:    firstNonEmpty(item.Note, item.WorkTitle, item.Title, "115 资源"),
-				URL:      item.URL,
-				Password: firstNonEmpty(item.Password, extractPassword(item.URL)),
-				Source:   fallback(item.Source, "PanSou"),
-				Datetime: item.Datetime,
-				Images:   item.Images,
-				Query:    query,
-				Note:     strings.TrimSpace(item.Note + " " + item.WorkTitle),
-			})
-		}
-	}
-
-	// merged_by_type 为空时，从 results 兜底，并二次过滤真实 115 链接
-	if len(items) == 0 {
-		for _, result := range resp.Results {
-			for _, link := range result.Links {
-				if !is115Link(link.URL) {
-					continue
-				}
-				items = append(items, normalizedResult{
-					Title:    firstNonEmpty(link.WorkTitle, result.Title, "115 资源"),
-					URL:      link.URL,
-					Password: firstNonEmpty(link.Password, extractPassword(link.URL)),
-					Source:   sourceName(result.Channel),
-					Datetime: firstNonEmpty(link.Datetime, result.Datetime),
-					Images:   result.Images,
-					Query:    query,
-					Note:     strings.TrimSpace(link.Note + " " + result.Title),
-				})
-			}
-		}
-	}
-	return items
-}
-
-func dedupeNormalizedResults(items []normalizedResult, limit int) []normalizedResult {
-	seen := map[string]bool{}
-	out := make([]normalizedResult, 0)
-	for _, item := range items {
-		key := item.URL + "|" + item.Password
-		if item.URL == "" && item.HDHiveSlug != "" {
-			key = "hdhive:" + item.HDHiveSlug
-		}
-		if key == "|" || key == "" {
-			continue
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, item)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out
-}
-
-func linkType(link pansouLinkItem) string {
-	if link.Type != "" {
-		return link.Type
-	}
-	if is115Link(link.URL) {
-		return "115"
-	}
-	return ""
-}
-
-func is115Link(rawURL string) bool {
-	rawURL = strings.ToLower(strings.TrimSpace(rawURL))
-	return strings.Contains(rawURL, "115.com/s/") || strings.Contains(rawURL, "115cdn.com/s/") || strings.Contains(rawURL, "anxia.com/s/")
-}
-
-func sourceName(channel string) string {
-	if strings.TrimSpace(channel) == "" {
-		return "PanSou"
-	}
-	return "tg:" + strings.TrimSpace(channel)
-}
-
-func pansouAuthHeaders(s settings) (map[string]string, error) {
-	if s.PansouUsername == "" || s.PansouPassword == "" {
-		if s.PansouToken != "" {
-			return map[string]string{"Authorization": "Bearer " + s.PansouToken}, nil
-		}
-		return map[string]string{}, nil
-	}
-	pansouToken.Lock()
-	defer pansouToken.Unlock()
-	if pansouToken.Token != "" && time.Now().Before(pansouToken.ExpiresAt.Add(-time.Minute)) {
-		return map[string]string{"Authorization": "Bearer " + pansouToken.Token}, nil
-	}
-	var loginResp struct {
-		Token     string `json:"token"`
-		ExpiresAt int64  `json:"expires_at"`
-	}
-	err := requestJSON(http.MethodPost, buildBaseURL(s.PansouURL, "/api/auth/login", nil), map[string]string{"Content-Type": "application/json"}, map[string]string{"username": s.PansouUsername, "password": s.PansouPassword}, &loginResp, 20*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	if loginResp.Token == "" {
-		return nil, errors.New("PanSou 未返回 token")
-	}
-	pansouToken.Token = loginResp.Token
-	pansouToken.ExpiresAt = time.Unix(loginResp.ExpiresAt, 0)
-	if loginResp.ExpiresAt == 0 {
-		pansouToken.ExpiresAt = time.Now().Add(time.Hour)
-	}
-	return map[string]string{"Authorization": "Bearer " + loginResp.Token}, nil
-}
-
-func testPanSouAuth(s settings) error {
-	payload := map[string]any{
-		"kw":          "test",
-		"res":         "merge",
-		"src":         "all",
-		"cloud_types": []string{"115"},
-		"filter": map[string]any{
-			"include": []string{},
-			"exclude": []string{},
-		},
-	}
-	headers, err := pansouAuthHeaders(s)
-	if err != nil {
-		return err
-	}
-	headers["Content-Type"] = "application/json"
-	var raw json.RawMessage
-	return pansouRequestJSON(s, http.MethodPost, buildBaseURL(s.PansouURL, "/api/search", nil), headers, payload, &raw, 8*time.Second)
-}
-
-func pansouRequestJSON(s settings, method, endpoint string, headers map[string]string, body any, out any, timeout time.Duration) error {
-	err := requestJSON(method, endpoint, headers, body, out, timeout)
-	if !isAuthHTTPStatus(err) || s.PansouUsername == "" || s.PansouPassword == "" {
-		return err
-	}
-	clearPanSouTokenCache()
-	s.PansouToken = ""
-	headers, authErr := pansouAuthHeaders(s)
-	if authErr != nil {
-		return authErr
-	}
-	headers["Content-Type"] = "application/json"
-	return requestJSON(method, endpoint, headers, body, out, timeout)
-}
-
-func isAuthHTTPStatus(err error) bool {
-	var statusErr httpStatusError
-	if !errors.As(err, &statusErr) {
-		return false
-	}
-	return statusErr.Status == http.StatusUnauthorized || statusErr.Status == http.StatusForbidden
-}
-
-func clearPanSouTokenCache() {
-	pansouToken.Lock()
-	defer pansouToken.Unlock()
-	pansouToken.Token = ""
-	pansouToken.ExpiresAt = time.Time{}
-}
-
-type transferRequest struct {
-	URL       string `json:"url"`
-	Link      string `json:"link"`
-	Password  string `json:"password"`
-	TargetCID string `json:"targetCid"`
-}
-
-type transferResult struct {
-	OK        bool   `json:"ok"`
-	Title     string `json:"title"`
-	Count     int    `json:"count"`
-	TargetCID string `json:"targetCid"`
-	ShareCode string `json:"shareCode"`
-	Message   string `json:"message"`
-}
-
-type shareSnapResp struct {
-	State bool   `json:"state"`
-	Error string `json:"error"`
-	Msg   string `json:"msg"`
-	Data  struct {
-		Count      int         `json:"count"`
-		ShareTitle string      `json:"share_title"`
-		ShareInfo  shareInfo   `json:"shareinfo"`
-		List       []shareItem `json:"list"`
-	} `json:"data"`
-}
-
-type shareInfo struct {
-	ShareTitle string `json:"share_title"`
-}
-
-type shareItem struct {
-	Name string `json:"n"`
-	CID  any    `json:"cid"`
-	FID  any    `json:"fid"`
-}
-
-func transfer115(s settings, body transferRequest) (transferResult, error) {
-	if err := requireFields(s, "p115Cookie"); err != nil {
-		return transferResult{}, err
-	}
-	link := firstNonEmpty(body.URL, body.Link)
-	shareCode, receiveCode, err := parse115Share(link, body.Password)
-	if err != nil {
-		return transferResult{}, err
-	}
-	targetCID := firstNonEmpty(body.TargetCID, s.P115TargetCID, "0")
-	title, items, err := list115Share(s.P115Cookie, shareCode, receiveCode)
-	if err != nil {
-		return transferResult{}, err
-	}
-	fileIDs := make([]string, 0)
-	for _, item := range items {
-		id := anyToString(item.FID)
-		if id == "" {
-			id = anyToString(item.CID)
-		}
-		if id != "" {
-			fileIDs = append(fileIDs, id)
-		}
-	}
-	if len(fileIDs) == 0 {
-		return transferResult{}, errors.New("115 分享中没有可转存文件")
-	}
-
-	form := url.Values{}
-	form.Set("cid", targetCID)
-	form.Set("share_code", shareCode)
-	form.Set("receive_code", receiveCode)
-	form.Set("file_id", strings.Join(fileIDs, ","))
-	if userID := userIDFrom115Cookie(s.P115Cookie); userID != "" {
-		form.Set("user_id", userID)
-	}
-	var resp map[string]any
-	if err := requestForm("https://webapi.115.com/share/receive", headers115(s.P115Cookie, true), form, &resp, 35*time.Second); err != nil {
-		return transferResult{}, fmt.Errorf("115 转存请求失败：%w", err)
-	}
-	if state, _ := resp["state"].(bool); !state {
-		return transferResult{}, errors.New(getErrorMessage(resp, "115 转存失败"))
-	}
-	return transferResult{OK: true, Title: title, Count: len(fileIDs), TargetCID: targetCID, ShareCode: shareCode, Message: "转存成功"}, nil
-}
-
-// ---- 后台任务系统 ----
-
 func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type       string   `json:"type"` // "scan" or "scan-search"
+		Type       string   `json:"type"`
 		AiredOnly  bool     `json:"airedOnly"`
 		MaxSeries  int      `json:"maxSeries"`
 		RecentOnly bool     `json:"recentOnly"`
@@ -2303,28 +1560,35 @@ func handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	body.AiredOnly = true
 	_ = readJSON(r, &body)
 
-	if body.Type != "scan" && body.Type != "scan-search" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "任务类型仅支持 scan 或 scan-search"})
+	if body.Type != "scan" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "任务类型仅支持 scan"})
 		return
 	}
 
 	s := store.Get()
-	if body.Type == "scan" {
-		if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-	} else {
-		if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey", "pansouUrl"); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
+	if err := requireFields(s, "embyUrl", "embyApiKey", "tmdbApiKey"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
 	}
 
-	j := jobMgr.create(body.Type)
-	activateScanJob(j.ID)
-	go runJob(j.ID, s, body.Type, body.AiredOnly, body.MaxSeries, body.RecentOnly, joinSeriesIDs(body.SeriesID, body.SeriesIDs))
+	j, created := startScanJob()
+	if created {
+		go runJob(j.ID, s, body.AiredOnly, body.MaxSeries, body.RecentOnly, joinSeriesIDs(body.SeriesID, body.SeriesIDs))
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"jobId": j.ID})
+}
+
+func startScanJob() (*job, bool) {
+	scanStartMu.Lock()
+	defer scanStartMu.Unlock()
+	if id := currentActiveScanJobID(); id != "" {
+		if j := jobMgr.get(id); j != nil && (j.Status == jobPending || j.Status == jobRunning) {
+			return j, false
+		}
+	}
+	j := jobMgr.create("scan")
+	activateScanJob(j.ID)
+	return j, true
 }
 
 func handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -2339,7 +1603,7 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "任务不存在或已过期"})
 		return
 	}
-	writeJSON(w, http.StatusOK, j)
+	writeJSON(w, http.StatusOK, jobResponse(j, r))
 }
 
 func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
@@ -2355,7 +1619,16 @@ func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 返回任务本身，即使已完成/出错也返回，让前端自行决定展示
-	writeJSON(w, http.StatusOK, map[string]any{"job": j})
+	writeJSON(w, http.StatusOK, map[string]any{"job": jobResponse(j, r)})
+}
+
+// Normal polling only needs progress. Full results remain available explicitly.
+func jobResponse(j *job, r *http.Request) *job {
+	if j != nil && r.URL.Query().Get("summary") == "1" {
+		j = cloneJob(j)
+		j.Result = nil
+	}
+	return j
 }
 
 func handleGetExemptions(w http.ResponseWriter, r *http.Request) {
@@ -2426,7 +1699,7 @@ type seriesExemptionInput struct {
 	TMDBYear string `json:"tmdbYear"`
 }
 
-func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, recentOnly bool, seriesID string) {
+func runJob(id string, s settings, airedOnly bool, maxSeries int, recentOnly bool, seriesID string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("runJob panic: %v", r)
@@ -2461,29 +1734,6 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 		j.Current = modeText
 	})
 	scanProgressMax := 99
-	searchProgressBase := 60
-	if typ == "scan-search" {
-		scanProgressMax = 55
-	}
-
-	// 进度条 ticker：扫描期间逐步更新
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(800 * time.Millisecond)
-		for {
-			select {
-			case <-ticker.C:
-				update(func(j *job) {
-					if j.Status == jobRunning && j.Progress < 8 {
-						j.Progress++
-					}
-				})
-			case <-done:
-				ticker.Stop()
-				return
-			}
-		}
-	}()
 
 	result, err := scanLibrary(s, airedOnly, maxSeries, recentOnly, changedSince, seriesID, func(processed, total int, detail, current string, snapshot map[string]any) {
 		if total <= 0 {
@@ -2512,15 +1762,12 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 			j.Result = map[string]any{"scan": snapshot}
 		})
 	})
-	close(done)
 	if err != nil {
 		update(func(j *job) { j.Status = jobError; j.Error = err.Error(); j.Message = "扫描失败" })
 		return
 	}
 	if strings.TrimSpace(seriesID) != "" {
-		for id := range parseSeriesIDSet(seriesID) {
-			result = mergeSingleSeriesScanResult(id, result)
-		}
+		result = mergeSelectedSeriesScanResult(selectedResultIDs(parseSeriesIDSet(seriesID), result), result)
 	}
 	_ = saveScanResult(result)
 	missingCount := 0
@@ -2532,148 +1779,12 @@ func runJob(id string, s settings, typ string, airedOnly bool, maxSeries int, re
 	}
 
 	update(func(j *job) {
-		if typ == "scan" {
-			j.Progress = 100
-			j.Status = jobDone
-			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失", missingCount)
-			j.Current = "完成"
-		} else {
-			j.Progress = searchProgressBase
-			j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失，开始搜索资源", missingCount)
-			j.Current = "搜索准备中"
-		}
+		j.Progress = 100
+		j.Status = jobDone
+		j.Message = fmt.Sprintf("扫描完成，共发现 %d 集缺失", missingCount)
+		j.Current = "完成"
 		j.Result = map[string]any{"scan": result}
 	})
-
-	if typ == "scan" {
-		return
-	}
-
-	// scan-search: 按剧名去重后搜索（不逐集搜）
-	missingList, _ := result["missing"].([]missingEpisode)
-	if len(missingList) == 0 {
-		update(func(j *job) { j.Status = jobDone; j.Progress = 100; j.Message = "无缺失集数，无需搜索" })
-		return
-	}
-
-	// 按剧名去重
-	type showGroup struct {
-		Title    string
-		Episodes []missingEpisode
-	}
-	showMap := map[string]*showGroup{}
-	var showOrder []string
-	for _, ep := range missingList {
-		key := ep.OfficialTitle
-		if key == "" {
-			key = ep.EmbyTitle
-		}
-		if g, ok := showMap[key]; ok {
-			g.Episodes = append(g.Episodes, ep)
-		} else {
-			showMap[key] = &showGroup{Title: key, Episodes: []missingEpisode{ep}}
-			showOrder = append(showOrder, key)
-		}
-	}
-
-	type searchItem struct {
-		Title    string             `json:"title"`
-		Episodes []missingEpisode   `json:"episodes"`
-		Results  []normalizedResult `json:"results,omitempty"`
-		Error    string             `json:"error,omitempty"`
-	}
-
-	searched := make([]searchItem, 0, len(showOrder))
-	total := len(showOrder)
-	for i, title := range showOrder {
-		grp := showMap[title]
-		progress := searchProgressBase
-		if total > 0 {
-			progress = searchProgressBase + (i*(99-searchProgressBase))/total
-		}
-		update(func(j *job) {
-			j.Progress = progress
-			j.Message = fmt.Sprintf("搜索中 (%d/%d): %s (缺 %d 集)", i+1, total, title, len(grp.Episodes))
-			j.Current = title
-		})
-
-		item := searchItem{Title: title, Episodes: grp.Episodes}
-		res, err := searchKeyword(s, title)
-		if err != nil {
-			item.Error = err.Error()
-		} else if results, ok := res["results"].([]normalizedResult); ok {
-			item.Results = results
-		}
-		searched = append(searched, item)
-	}
-
-	_ = saveSearchResults(searched)
-	update(func(j *job) {
-		j.Status = jobDone
-		j.Progress = 100
-		j.Message = fmt.Sprintf("扫描搜索完成，共 %d 个剧集", len(showOrder))
-		j.Current = "完成"
-		j.Result = map[string]any{"scan": result, "searched": searched}
-	})
-}
-
-// ----
-
-func parse115Share(link, password string) (string, string, error) {
-	raw := link + " " + password
-	re := regexp.MustCompile(`(?i)(?:115cdn\.com|115\.com|anxia\.com)/s/([A-Za-z0-9]+)|/s/([A-Za-z0-9]+)`)
-	match := re.FindStringSubmatch(raw)
-	if len(match) == 0 {
-		return "", "", errors.New("无法识别 115 分享链接")
-	}
-	shareCode := firstNonEmpty(match[1], match[2])
-	receiveCode := strings.TrimSpace(firstNonEmpty(password, extractPassword(raw)))
-	if receiveCode == "" {
-		return "", "", errors.New("缺少 115 访问码 / password")
-	}
-	return shareCode, receiveCode, nil
-}
-
-func list115Share(cookie, shareCode, receiveCode string) (string, []shareItem, error) {
-	offset := 0
-	limit := 100
-	count := 1<<31 - 1
-	items := make([]shareItem, 0)
-	title := "115 分享"
-	for len(items) < count && offset < 5000 {
-		query := map[string]string{
-			"share_code":   shareCode,
-			"receive_code": receiveCode,
-			"offset":       strconv.Itoa(offset),
-			"limit":        strconv.Itoa(limit),
-			"cid":          "",
-		}
-		var resp shareSnapResp
-		if err := requestJSON(http.MethodGet, buildBaseURL("https://webapi.115.com", "/share/snap", query), headers115(cookie, false), nil, &resp, 35*time.Second); err != nil {
-			return "", nil, err
-		}
-		if !resp.State {
-			return "", nil, errors.New(firstNonEmpty(resp.Error, resp.Msg, "115 分享链接无效或访问码错误"))
-		}
-		if resp.Data.ShareTitle != "" {
-			title = resp.Data.ShareTitle
-		} else if resp.Data.ShareInfo.ShareTitle != "" {
-			title = resp.Data.ShareInfo.ShareTitle
-		} else if len(resp.Data.List) > 0 && resp.Data.List[0].Name != "" {
-			title = resp.Data.List[0].Name
-		}
-		items = append(items, resp.Data.List...)
-		if resp.Data.Count > 0 {
-			count = resp.Data.Count
-		} else {
-			count = len(items)
-		}
-		if len(resp.Data.List) == 0 {
-			break
-		}
-		offset += len(resp.Data.List)
-	}
-	return title, items, nil
 }
 
 func embyGet(s settings, route string, query map[string]string, out any) error {
@@ -2761,7 +1872,7 @@ func loadSeriesEpisodes(s settings, seriesID string, onPage func(page, count int
 		route := "/Shows/" + url.PathEscape(seriesID) + "/Episodes"
 		if err := embyGet(s, route, map[string]string{
 			"IsMissing":  "false",
-			"Fields":     "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
+			"Fields":     "SeriesId,ProviderIds,ParentIndexNumber,IndexNumber,IndexNumberEnd,PremiereDate,Path,SeasonId,LocationType,IsMissing,MediaSources",
 			"SortBy":     "ParentIndexNumber,IndexNumber",
 			"StartIndex": strconv.Itoa(startIndex),
 			"Limit":      strconv.Itoa(pageLimit),
@@ -2855,28 +1966,6 @@ func requestJSON(method, endpoint string, headers map[string]string, body any, o
 	return fmt.Errorf("请求失败，已重试3次")
 }
 
-func requestForm(endpoint string, headers map[string]string, form url.Values, out any, timeout time.Duration) error {
-	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	client := *httpCli
-	client.Timeout = timeout
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return httpStatusError{Status: resp.StatusCode, Body: shortBody(raw)}
-	}
-	return json.Unmarshal(raw, out)
-}
-
 func isTimeoutError(err error) bool {
 	if err == nil {
 		return false
@@ -2886,39 +1975,6 @@ func isTimeoutError(err error) bool {
 	}
 	text := err.Error()
 	return strings.Contains(text, "timeout") || strings.Contains(text, "deadline") || strings.Contains(text, "Timeout")
-}
-
-func headers115(cookie string, form bool) map[string]string {
-	headers := map[string]string{
-		"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 MicroMessenger/6.8.0 NetType/WIFI MiniProgramEnv/Mac MacWechat/WMPF",
-		"Referer":    "https://servicewechat.com/wx2c744c010a61b0fa/94/page-frame.html",
-		"Accept":     "*/*",
-		"Cookie":     cookie,
-	}
-	if form {
-		headers["Content-Type"] = "application/x-www-form-urlencoded"
-	}
-	return headers
-}
-
-func extractCookieValue(cookie, name string) string {
-	for _, part := range strings.Split(cookie, ";") {
-		part = strings.TrimSpace(part)
-		key, value, ok := strings.Cut(part, "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), name) {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func userIDFrom115Cookie(cookie string) string {
-	uid := extractCookieValue(cookie, "UID")
-	if uid == "" {
-		return ""
-	}
-	userID, _, _ := strings.Cut(uid, "_")
-	return strings.TrimSpace(userID)
 }
 
 func buildBaseURL(base, route string, query map[string]string) string {
@@ -3424,20 +2480,6 @@ func bodyToMissing(raw map[string]interface{}) missingEpisode {
 	return missing
 }
 
-func extractPassword(text string) string {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)[?&](?:password|pwd|receive_code)=([A-Za-z0-9]+)`),
-		regexp.MustCompile(`(?i)(?:访问码|提取码|密码)[:：\s]*([A-Za-z0-9]{4})`),
-	}
-	for _, pattern := range patterns {
-		match := pattern.FindStringSubmatch(text)
-		if len(match) > 1 {
-			return match[1]
-		}
-	}
-	return ""
-}
-
 func anyToString(value any) string {
 	switch v := value.(type) {
 	case nil:
@@ -3455,15 +2497,6 @@ func anyToString(value any) string {
 	}
 }
 
-func getErrorMessage(m map[string]any, fallbackValue string) string {
-	for _, key := range []string{"error", "msg", "message", "error_msg"} {
-		if value, ok := m[key].(string); ok && value != "" {
-			return value
-		}
-	}
-	return fallbackValue
-}
-
 func shortBody(raw []byte) string {
 	text := strings.TrimSpace(string(raw))
 	if len(text) > 180 {
@@ -3479,6 +2512,12 @@ func newSeriesScanCacheStore(path string) *seriesScanCacheStore {
 	}
 	if err := loadStateJSON("series_scan_cache", path, &store.data); err != nil {
 		store.data = map[string]seriesScanCacheEntry{}
+	}
+	for id, entry := range store.data {
+		if entry.Complete && !entry.Manual && (entry.Verification != seriesScanCacheVersion || entry.SeriesStatus != "Ended" || entry.InProduction) {
+			delete(store.data, id)
+			store.dirty = true
+		}
 	}
 	return store
 }
@@ -3623,38 +2662,7 @@ func saveScanResult(result map[string]any) error {
 }
 
 func mergeSingleSeriesScanResult(seriesID string, fresh map[string]any) map[string]any {
-	seriesID = strings.TrimSpace(seriesID)
-	if seriesID == "" {
-		return fresh
-	}
-	previous, err := loadScanResult()
-	if err != nil || previous == nil {
-		return fresh
-	}
-
-	mergedMissing := make([]any, 0)
-	for _, item := range anySlice(previous["missing"]) {
-		if missingItemSeriesID(item) == seriesID {
-			continue
-		}
-		mergedMissing = append(mergedMissing, item)
-	}
-	mergedMissing = append(mergedMissing, anySlice(fresh["missing"])...)
-
-	previous["missing"] = mergedMissing
-	previous["scannedAt"] = time.Now().Format(time.RFC3339)
-	if summary, ok := previous["summary"].(map[string]any); ok {
-		summary["totalMissingEpisodes"] = len(mergedMissing)
-		summary["scanMode"] = "single"
-		if freshSummary, ok := fresh["summary"].(map[string]any); ok {
-			summary["seriesRescanned"] = freshSummary["seriesRescanned"]
-			summary["seriesCached"] = freshSummary["seriesCached"]
-			summary["unmatchedSeries"] = freshSummary["unmatchedSeries"]
-		}
-	}
-	previous["diagnostics"] = fresh["diagnostics"]
-	previous["unmatched"] = fresh["unmatched"]
-	return previous
+	return mergeSelectedSeriesScanResult(parseSeriesIDSet(seriesID), fresh)
 }
 
 func removeSeriesFromSavedScanResult(seriesIDs []string) {
@@ -3690,6 +2698,12 @@ func removeSeriesFromSavedScanResult(seriesIDs []string) {
 
 func anySlice(value any) []any {
 	switch items := value.(type) {
+	case []string:
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
 	case []any:
 		return items
 	case []missingEpisode:
@@ -3784,455 +2798,29 @@ func loadScanResult() (map[string]any, error) {
 	return result, nil
 }
 
-func searchResultsPath() string {
-	return getenv("SEARCH_RESULTS_PATH", filepath.Join(filepath.Dir(getenv("CONFIG_PATH", filepath.Join("data", "config.json"))), "search-results.json"))
-}
-
-func saveSearchResults(searched any) error {
-	path := searchResultsPath()
-	return saveStateJSON("search_results", path, searched)
-}
-
-func loadSearchResults() ([]any, error) {
-	path := searchResultsPath()
-	var results []any
-	if stateDB != nil {
-		stateDB.ImportJSONFile("search_results", path, &results)
-	}
-	if err := loadStateJSON("search_results", path, &results); err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
-// ---- MoviePilot 搜索/下载 ----
-
-// ---- MoviePilot 核心函数 ----
-
-// ---- MoviePilot 搜索/下载 ----
-
-func handleMPSearch(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Keyword       string `json:"keyword"`
-		TMDBID        string `json:"tmdbId"`
-		OriginalTitle string `json:"originalTitle"`
-		Season        int    `json:"season"`
-		Episodes      []int  `json:"episodes"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	s := store.Get()
-	if s.MPUrl == "" || s.MPToken == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先配置 MoviePilot 地址和 API Token"})
-		return
-	}
-	var allResults []map[string]any
-	var errors []string
-	keywords := []string{body.Keyword}
-	if body.OriginalTitle != "" && body.OriginalTitle != body.Keyword {
-		keywords = append(keywords, body.OriginalTitle)
-	}
-	for _, kw := range keywords {
-		r, err := mpDoSearch(s, kw, body.TMDBID)
-		if err != nil {
-			errors = append(errors, kw+": "+err.Error())
-		}
-		allResults = append(allResults, r...)
-	}
-	target := scoreTarget{Season: body.Season, Episodes: body.Episodes}
-	allResults = annotateTorrentResults(allResults, target)
-	result := map[string]any{"results": allResults}
-	if len(errors) > 0 {
-		result["errors"] = errors
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func mpDoSearch(s settings, keyword string, tmdbID string) ([]map[string]any, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	mpURL := s.MPUrl
-	token := s.MPToken
-
-	if mpURL == "" || token == "" {
-		return nil, fmt.Errorf("MP 地址或 Token 未配置")
-	}
-
-	var allResults []map[string]any
-
-	// 1. 标题模糊搜
-	u1 := fmt.Sprintf("%s/api/v1/search/title?keyword=%s", mpURL, url.QueryEscape(keyword))
-	req1, _ := http.NewRequest(http.MethodGet, u1, nil)
-	req1.Header.Set("Accept", "application/json")
-	req1.Header.Set("x-api-key", token)
-	resp1, err := client.Do(req1)
-	if err != nil {
-		return nil, fmt.Errorf("MP 请求失败(%s): %w", u1, err)
-	}
-	raw1, _ := io.ReadAll(resp1.Body)
-	resp1.Body.Close()
-	if resp1.StatusCode >= 400 {
-		return nil, fmt.Errorf("MP HTTP %d: %s", resp1.StatusCode, shortBody(raw1))
-	}
-	allResults = append(allResults, mpParseResults(raw1)...)
-
-	// 2. TMDB 精确搜
-	if tmdbID != "" {
-		u2 := fmt.Sprintf("%s/api/v1/search/media/tmdb:%s", mpURL, tmdbID)
-		req2, _ := http.NewRequest(http.MethodGet, u2, nil)
-		req2.Header.Set("Accept", "application/json")
-		req2.Header.Set("x-api-key", token)
-		resp2, err := client.Do(req2)
-		if err == nil {
-			raw2, _ := io.ReadAll(resp2.Body)
-			resp2.Body.Close()
-			allResults = append(allResults, mpParseResults(raw2)...)
-		}
-	}
-
-	// 去重
-	seen := map[string]bool{}
-	var deduped []map[string]any
-	for _, item := range allResults {
-		key := ""
-		if enc, ok := item["enclosure"].(string); ok && enc != "" {
-			key = enc
-		} else if title, ok := item["title"].(string); ok {
-			key = title
-		}
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		deduped = append(deduped, item)
-	}
-	return deduped, nil
-}
-
-func mpParseResults(raw []byte) []map[string]any {
-	var results []map[string]any
-	var wrapper struct {
-		Success bool             `json:"success"`
-		Data    []map[string]any `json:"data"`
-	}
-	if json.Unmarshal(raw, &wrapper) == nil && len(wrapper.Data) > 0 {
-		for _, item := range wrapper.Data {
-			if ti, ok := item["torrent_info"].(map[string]any); ok {
-				results = append(results, ti)
-			} else if ri, ok := item["torrents"].([]any); ok {
-				for _, t := range ri {
-					if tm, ok := t.(map[string]any); ok {
-						results = append(results, tm)
-					}
-				}
-			} else {
-				results = append(results, item)
-			}
-		}
-		return results
-	}
-	json.Unmarshal(raw, &results)
-	return results
-}
-
-func handleMPDownload(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Title       string         `json:"title"`
-		TorrentURL  string         `json:"torrentUrl"`
-		Magnet      string         `json:"magnet"`
-		Description string         `json:"description"`
-		TMDBID      string         `json:"tmdbId"`
-		RawData     map[string]any `json:"rawData"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	s := store.Get()
-	if s.MPUrl == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先配置 MoviePilot 地址"})
-		return
-	}
-	if err := mpDownload(s, body.RawData, body.TMDBID); err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"message": "已提交 MoviePilot 下载"})
-}
-
-func handleMPSubscribeStatus(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		TMDBID    string `json:"tmdbId"`
-		MediaType string `json:"mediaType"`
-		Season    int    `json:"season"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	s := store.Get()
-	if strings.TrimSpace(s.MPUrl) == "" || strings.TrimSpace(s.MPToken) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先配置 MoviePilot 地址和 API Token"})
-		return
-	}
-	result, err := mpSubscriptionStatus(s, body.TMDBID, body.MediaType, body.Season)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func handleMPSubscribe(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		TMDBID    string `json:"tmdbId"`
-		MediaType string `json:"mediaType"`
-		Season    int    `json:"season"`
-		Title     string `json:"title"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	s := store.Get()
-	if strings.TrimSpace(s.MPUrl) == "" || strings.TrimSpace(s.MPToken) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先配置 MoviePilot 地址和 API Token"})
-		return
-	}
-	result, err := mpSubscribe(s, body.TMDBID, body.MediaType, body.Season, body.Title)
-	if err != nil {
-		writeError(w, statusFromError(err), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
-func mpSubscriptionStatus(s settings, tmdbID string, mediaType string, season int) (map[string]any, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(s.MPUrl), "/")
-	token := strings.TrimSpace(s.MPToken)
-	tmdbID = strings.TrimSpace(tmdbID)
-	if baseURL == "" || token == "" {
-		return nil, fmt.Errorf("MP 地址或 Token 未配置")
-	}
-	if tmdbID == "" {
-		return nil, fmt.Errorf("tmdbId 不能为空")
-	}
-	endpoint := fmt.Sprintf("%s/api/v1/subscribe/media/tmdb:%s?token=%s", baseURL, url.PathEscape(tmdbID), url.QueryEscape(token))
-	if !strings.EqualFold(strings.TrimSpace(mediaType), "movie") && season > 0 {
-		endpoint += fmt.Sprintf("&season=%d", season)
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("MoviePilot 订阅状态请求失败：%w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("MoviePilot 订阅状态失败 HTTP %d: %s", resp.StatusCode, shortBody(raw))
-	}
-	var decoded any
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			return map[string]any{"exists": false, "raw": strings.TrimSpace(string(raw))}, nil
-		}
-	}
-	return normalizeMPSubscriptionStatus(decoded), nil
-}
-
-func mpSubscribe(s settings, tmdbID string, mediaType string, season int, title string) (map[string]any, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(s.MPUrl), "/")
-	token := strings.TrimSpace(s.MPToken)
-	tmdbID = strings.TrimSpace(tmdbID)
-	mediaType = strings.TrimSpace(mediaType)
-	if baseURL == "" || token == "" {
-		return nil, fmt.Errorf("MP 地址或 Token 未配置")
-	}
-	if tmdbID == "" {
-		return nil, fmt.Errorf("tmdbId 不能为空")
-	}
-	if mediaType == "" {
-		mediaType = "tv"
-	}
-	tmdbNumber, _ := strconv.Atoi(tmdbID)
-	if tmdbNumber <= 0 {
-		return nil, fmt.Errorf("tmdbId 无效")
-	}
-	mediaType = strings.ToLower(mediaType)
-	if mediaType != "movie" {
-		mediaType = "tv"
-	}
-	cleanTitle := strings.TrimSpace(title)
-	if cleanTitle == "" {
-		cleanTitle = fmt.Sprintf("TMDB %d", tmdbNumber)
-	}
-	media := map[string]any{"media_type": mediaType, "tmdbId": tmdbNumber}
-	payload := map[string]any{
-		"notification_type": "MEDIA_APPROVED",
-		"subject":           cleanTitle,
-		"media":             media,
-		"request":           map[string]any{"requestedBy_username": "emby-ecer"},
-	}
-	if mediaType != "movie" && season > 0 {
-		payload["extra"] = []map[string]any{{"name": "Requested Seasons", "value": strconv.Itoa(season)}}
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/subscribe/seerr", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("MoviePilot 发送订阅失败：%w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("MoviePilot 发送订阅失败 HTTP %d: %s", resp.StatusCode, shortBody(body))
-	}
-	var result map[string]any
-	if len(body) == 0 {
-		return map[string]any{"ok": true}, nil
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return map[string]any{"ok": true, "raw": strings.TrimSpace(string(body))}, nil
-	}
-	return result, nil
-}
-
-func normalizeMPSubscriptionStatus(decoded any) map[string]any {
-	result := map[string]any{"exists": false}
-	data := mpExtractSubscriptionData(decoded)
-	if data == nil {
-		if decoded != nil {
-			result["data"] = decoded
-		}
-		return result
-	}
-	result["data"] = data
-	if value := firstNonEmpty(anyToString(data["id"]), anyToString(data["subscribe_id"]), anyToString(data["subscribeId"]), anyToString(data["media_id"]), anyToString(data["mediaId"])); value != "" {
-		result["id"] = value
-		result["exists"] = true
-	}
-	if value := firstNonEmpty(anyToString(data["name"]), anyToString(data["title"])); value != "" {
-		result["title"] = value
-	}
-	if value := firstNonEmpty(anyToString(data["year"]), anyToString(data["release_year"])); value != "" {
-		result["year"] = value
-	}
-	if value := firstNonEmpty(anyToString(data["type"]), anyToString(data["media_type"]), anyToString(data["mediaType"])); value != "" {
-		result["mediaType"] = value
-	}
-	if seasonValue, ok := anyToInt(data["season"]); ok {
-		result["season"] = seasonValue
-	}
-	if statusValue := firstNonEmpty(anyToString(data["status"]), anyToString(data["state"])); statusValue != "" {
-		result["status"] = statusValue
-	}
-	if result["exists"] == false {
-		if allNilMap(data) {
-			return result
-		}
-		if len(data) > 0 {
-			result["exists"] = true
-		}
-	}
-	return result
-}
-
-func mpExtractSubscriptionData(decoded any) map[string]any {
-	switch value := decoded.(type) {
-	case map[string]any:
-		if data, ok := value["data"]; ok {
-			if mapped := mpExtractSubscriptionData(data); mapped != nil {
-				return mapped
-			}
-		}
-		return value
-	case []any:
-		for _, item := range value {
-			if mapped := mpExtractSubscriptionData(item); mapped != nil {
-				return mapped
-			}
-		}
-	}
-	return nil
-}
-
-func anyToInt(value any) (int, bool) {
-	switch v := value.(type) {
-	case int:
-		return v, true
-	case int64:
-		return int(v), true
-	case float64:
-		return int(v), true
-	case string:
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return 0, false
-		}
-		return parseInt(v), true
-	case json.Number:
-		i, err := v.Int64()
-		if err == nil {
-			return int(i), true
-		}
-	}
-	return 0, false
-}
-
-func allNilMap(values map[string]any) bool {
-	if len(values) == 0 {
+func parseBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on", "启用", "是":
 		return true
+	default:
+		return false
 	}
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		if text := anyToString(value); text != "" && text != "0" && !strings.EqualFold(text, "null") {
-			return false
-		}
-	}
-	return true
 }
 
-func mpDownload(s settings, rawData map[string]any, tmdbID string) error {
-	timeout := time.Duration(getenvInt("MP_DOWNLOAD_TIMEOUT_SECONDS", 90)) * time.Second
-	client := &http.Client{Timeout: timeout}
-	mpURL := strings.TrimRight(strings.TrimSpace(s.MPUrl), "/")
-	payload := map[string]any{"torrent_in": rawData}
-	if tmdbID != "" {
-		payload["tmdbid"], _ = strconv.Atoi(tmdbID)
+func getenvBool(key string, fallbackValue bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallbackValue
 	}
-	raw, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodPost, mpURL+"/api/v1/download/add", bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", s.MPToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		if isTimeoutError(err) {
-			return fmt.Errorf("MoviePilot 下载提交超时（%s）：MoviePilot 没有及时返回，请检查 %s 是否卡住或把 MP_DOWNLOAD_TIMEOUT_SECONDS 调大", timeout, mpURL)
-		}
-		return fmt.Errorf("MoviePilot 下载失败：%w", err)
+	return parseBool(value)
+}
+
+func clampIntervalHours(value int) int {
+	if value <= 0 {
+		return 6
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("MoviePilot 下载失败 HTTP %d: %s", resp.StatusCode, shortBody(body))
+	if value > 168 {
+		return 168
 	}
-	return nil
+	return value
 }

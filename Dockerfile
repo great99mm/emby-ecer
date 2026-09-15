@@ -14,8 +14,7 @@ RUN npm run build
 FROM alpine:3.20
 ENV PORT=3000 \
     CONFIG_PATH=/data/config.json \
-    PUBLIC_DIR=/app/public \
-    PANSOU_URL=https://so.252035.xyz
+    PUBLIC_DIR=/app/public
 WORKDIR /app
 COPY --from=gobuilder /out/emby-ecer /app/emby-ecer
 COPY --from=webbuilder /app/dist ./public

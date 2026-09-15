@@ -1,82 +1,54 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import useStore from './store';
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { api } from './api';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import Home from './pages/Home';
 import Missing from './pages/Missing';
 import Settings from './pages/Settings';
-import Subscriptions from './pages/Subscriptions';
 
 function JobPoller() {
-  const activeJobId = useStore(s => s.activeJobId);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
-  const setScan = useStore(s => s.setScan);
-  const applySearchResults = useStore(s => s.applySearchResults);
-  const clearJob = useStore(s => s.clearJob);
-  const intervalRef = useRef(null);
-  const activeJobIdRef = useRef(activeJobId);
-
   useEffect(() => {
-    activeJobIdRef.current = activeJobId;
-  }, [activeJobId]);
-
-  const applyJob = (j) => {
-    if (!j) return;
-    setJobStatus(j);
-    if (j.id && activeJobIdRef.current !== j.id) {
-      setActiveJobId(j.id);
-    }
-    if (j.result?.scan) {
-      setScan(j.result.scan);
-    }
-    if (j.status === 'done') {
-      if (j.result?.searched) applySearchResults(j.result.searched);
-      // 不自动清除，让用户手动关闭
-    } else if (j.status === 'error') {
-      // 不自动清除，让用户手动关闭
-    }
-  };
-
-  const recoverActiveJob = async () => {
-    const data = await api('/api/jobs/active');
-    if (data.job?.id) {
-      applyJob(data.job);
-      return true;
-    }
-    return false;
-  };
-
-  useEffect(() => {
+    let stopped = false;
+    let timer;
+    let lastFull = { id: null, at: 0, terminal: false };
+    const controller = new AbortController();
+    const request = path => api(path, { signal: controller.signal });
     const poll = async () => {
       try {
-        const recovered = await recoverActiveJob();
-        if (recovered) {
-          return;
+        if (document.hidden) return;
+        const requestedId = useStore.getState().activeJobId;
+        const data = await request('/api/jobs/active?summary=1');
+        let j = data.job;
+        if (!j && requestedId) j = await request(`/api/jobs/${requestedId}?summary=1`);
+        if (stopped || !j) return;
+        const current = useStore.getState();
+        if (current.activeJobId !== requestedId && current.activeJobId !== j.id) return;
+        const terminal = ['done', 'error'].includes(j.status);
+        current.setJobStatus(j);
+        current.setActiveJobId(j.id);
+        // Progress is tiny; refresh the episode list every 30 seconds and on
+        // completion. Scheduling after each response prevents overlapping calls.
+        if (lastFull.id !== j.id || (terminal && !lastFull.terminal) || (!terminal && Date.now() - lastFull.at >= 30000)) {
+          const full = await request(`/api/jobs/${j.id}`);
+          if (stopped || useStore.getState().activeJobId !== j.id) return;
+          if (full.result?.scan && (full.result.scan.summary?.scanMode !== 'single' || full.status === 'done')) useStore.getState().setScan(full.result.scan);
+          useStore.getState().setJobStatus({ ...full, result: undefined });
+          lastFull = { id: j.id, at: Date.now(), terminal: ['done', 'error'].includes(full.status) };
+          if (lastFull.terminal) useStore.getState().setActiveJobId(null);
+        } else if (terminal) {
+          current.setActiveJobId(null);
         }
-        const currentJobId = activeJobIdRef.current;
-        if (!currentJobId) {
-          return;
-        }
-        const j = await api(`/api/jobs/${currentJobId}`);
-        applyJob(j);
       } catch (err) {
-        // 以服务端活跃任务为准；瞬时失败时保留当前展示，避免任务条误消失。
-        try {
-          const recovered = await recoverActiveJob();
-          if (!recovered && err?.status === 404 && activeJobIdRef.current) {
-            clearJob();
-          }
-        } catch {
-          // 网络/认证瞬时失败时保留当前任务状态，下次轮询继续恢复。
-        }
+        // Keep the latest result through temporary network failures.
+        if (!stopped && err?.status === 404) useStore.getState().setActiveJobId(null);
+      } finally {
+        if (!stopped) timer = setTimeout(poll, 2000);
       }
     };
     poll();
-    intervalRef.current = setInterval(poll, 2000);
-    return () => clearInterval(intervalRef.current);
+    return () => { stopped = true; clearTimeout(timer); controller.abort(); };
   }, []);
 
   return null;
@@ -96,7 +68,6 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/missing" element={<Missing />} />
-        <Route path="/subscriptions" element={<Subscriptions />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

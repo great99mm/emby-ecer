@@ -1,4 +1,4 @@
-module emby115helper
+module embyecer
 
 go 1.25.0
 

@@ -1,111 +1,63 @@
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useEffect, useLayoutEffect } from 'react';
+import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import useStore from '../store';
-import { LogOut, Home, AlertTriangle, SlidersHorizontal, Clapperboard, Timer } from 'lucide-react';
+import ConnectionBadge from './ConnectionBadge';
+import { LogOut, LayoutDashboard, Library, SlidersHorizontal, Radar, ArrowUpRight } from 'lucide-react';
 
 const tabs = [
-  { path: '/', label: '首页', icon: Home },
-  { path: '/missing', label: '缺集', icon: AlertTriangle },
-  { path: '/subscriptions', label: '订阅', icon: Timer },
-  { path: '/settings', label: '授权', icon: SlidersHorizontal },
+  { path: '/', label: '工作台', icon: LayoutDashboard },
+  { path: '/missing', label: '缺集列表', icon: Library },
+  { path: '/settings', label: '连接设置', icon: SlidersHorizontal },
 ];
 
 export default function Layout({ children }) {
   const navigate = useNavigate();
-  const location = useLocation();
+  const { pathname } = useLocation();
+  useLayoutEffect(() => { window.scrollTo(0, 0); }, [pathname]);
   const logout = useStore(s => s.logout);
-
+  const settings = useStore(s => s.settings);
+  const connectionStatus = useStore(s => s.connectionStatus);
+  const checkConnections = useStore(s => s.checkConnections);
+  useEffect(() => {
+    if (!settings.ready) return;
+    const refresh = () => { if (!document.hidden) checkConnections(); };
+    refresh();
+    const interval = setInterval(refresh, 60000);
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [settings, pathname, checkConnections]);
+  const count = useStore(s => s.missing.length);
+  const exit = () => { logout(); navigate('/'); };
   return (
-    <div className="min-h-screen bg-[#f5f7fb] flex text-gray-900">
-      {/* Desktop Sidebar */}
-      <aside className="hidden md:flex md:flex-col md:w-64 md:shrink-0 bg-white/90 backdrop-blur border-r border-gray-200 shadow-sm">
-        <div className="px-5 py-5 border-b border-gray-100">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary-600 text-white shadow-sm shadow-primary-200">
-              <Clapperboard className="w-5 h-5" />
-            </div>
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary-600">Missing Radar</p>
-              <span className="block text-lg font-extrabold leading-none text-gray-900">Emby Ecer</span>
-            </div>
-          </div>
-        </div>
-        <nav className="flex-1 px-4 py-5 space-y-1.5">
-          {tabs.map(({ path, label, icon: Icon }) => {
-            const active = location.pathname === path;
-            return (
-              <button
-                key={path}
-                onClick={() => navigate(path)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold transition-all ${
-                  active
-                    ? 'bg-primary-600 text-white shadow-sm shadow-primary-200'
-                    : 'text-gray-500 hover:text-gray-800 hover:bg-gray-100'
-                }`}
-              >
-                <Icon className={`w-5 h-5 ${active ? 'text-white' : 'text-gray-400'}`} />
-                {label}
-              </button>
-            );
-          })}
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <NavLink to="/" className="app-brand" aria-label="Emby Ecer 工作台">
+          <span className="brand-symbol"><Radar size={22} strokeWidth={1.6} /></span>
+          <span><span className="block text-lg font-semibold tracking-tight">Emby Ecer</span><span className="mt-0.5 block text-[11px] text-gray-400">专注缺集，轻松补齐</span></span>
+        </NavLink>
+        <nav className="app-nav" aria-label="主导航">
+          {tabs.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}><Icon size={19} strokeWidth={1.65} />{label}{path === '/missing' && count > 0 && <span className="nav-count">{count > 99 ? '99+' : count}</span>}</NavLink>)}
         </nav>
-        <div className="px-4 py-5 border-t border-gray-100">
-          <div className="mb-3 rounded-lg bg-gray-50 px-4 py-3 text-xs text-gray-500">
-            <div className="font-bold text-gray-700">系统状态</div>
-            <div className="mt-1">媒体库扫描、盘搜与 MP 搜索统一管理</div>
+        <div className="mt-auto px-2 pt-10">
+          <div className="rounded-xl border border-gray-200/80 bg-white p-4">
+            <div className="mb-3 flex items-center justify-between"><p className="text-xs font-medium text-gray-500">服务连接</p><NavLink to="/settings" aria-label="管理连接" className="text-gray-400 hover:text-primary-600"><ArrowUpRight size={15} /></NavLink></div>
+            {[['emby','Emby'],['tmdb','TMDB'],['mp','MoviePilot']].map(([key,name]) => <div key={key} className="mt-2 flex items-center justify-between gap-2 text-xs"><span className="text-gray-600">{name}</span><ConnectionBadge connection={connectionStatus[key]} compact /></div>)}
           </div>
-          <button
-            onClick={() => { logout(); navigate('/'); }}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-semibold text-gray-500 hover:text-red-600 hover:bg-red-50 transition-colors"
-          >
-            <LogOut className="w-5 h-5" />
-            退出登录
-          </button>
+          <button onClick={exit} className="btn-ghost mt-4 w-full justify-start"><LogOut size={16} />退出登录</button>
         </div>
       </aside>
-
-      {/* Main area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Mobile header */}
-        <header className="sticky top-0 z-30 bg-white/85 backdrop-blur border-b border-gray-200 md:hidden">
-          <div className="h-14 flex items-center justify-between px-4">
-            <div className="flex items-center gap-2">
-              <Clapperboard className="w-5 h-5 text-primary-600" />
-              <h1 className="text-base font-extrabold text-gray-900">Emby Ecer</h1>
-            </div>
-            <button
-              onClick={() => { logout(); navigate('/'); }}
-              className="p-2 rounded-xl hover:bg-gray-100 transition-colors"
-            >
-              <LogOut className="w-5 h-5 text-gray-500" />
-            </button>
-          </div>
-        </header>
-
-        {/* Content */}
-        <main className="flex-1 w-full max-w-[1240px] mx-auto px-4 md:px-8 py-6 pb-24 md:pb-8">
-          {children}
-        </main>
-      </div>
-
-      {/* Mobile bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur border-t border-gray-200 md:hidden">
-        <div className="flex justify-around px-2 py-2">
-          {tabs.map(({ path, label, icon: Icon }) => {
-            const active = location.pathname === path;
-            return (
-              <button
-                key={path}
-                onClick={() => navigate(path)}
-                className={`flex min-w-0 flex-1 flex-col items-center gap-0.5 px-2 py-2 rounded-md transition-colors ${
-                  active ? 'text-primary-600 bg-primary-50' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Icon className="w-5 h-5" />
-                <span className="text-xs font-semibold">{label}</span>
-              </button>
-            );
-          })}
-        </div>
+      <header className="mobile-header">
+        <NavLink to="/" className="flex items-center gap-2.5"><span className="brand-symbol !h-9 !w-9"><Radar size={21} /></span><span className="text-base font-semibold tracking-tight">Emby Ecer</span></NavLink>
+        <button onClick={exit} className="icon-button" aria-label="退出登录"><LogOut size={18} /></button>
+      </header>
+      <main className="app-main"><div className="app-content">{children}</div></main>
+      <nav className="mobile-nav" aria-label="底部导航">
+        {tabs.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}><Icon size={20} strokeWidth={1.65} /><span>{label}</span></NavLink>)}
       </nav>
     </div>
   );

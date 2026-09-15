@@ -3,5 +3,5 @@ frontend/node_modules
 .git
 .env
 *.log
-emby-115-helper
+emby-ecer
 data

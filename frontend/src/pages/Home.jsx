@@ -1,252 +1,78 @@
-import { useNavigate } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Radar, Clock, AlertTriangle, Tv, Film, ChevronRight, RefreshCw, Activity } from 'lucide-react';
+import { Radar, Clock3, ArrowRight, ArrowUpRight, RefreshCw, Server, BadgeCheck, Download, Film, Check, ListChecks } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
+import ScanDiagnostics from '../components/ScanDiagnostics';
+import RadarArt from '../components/RadarArt';
+import ConnectionBadge from '../components/ConnectionBadge';
 
 export default function Home() {
   const navigate = useNavigate();
-  const scan = useStore(s => s.scan);
-  const missing = useStore(s => s.missing);
-  const jobStatus = useStore(s => s.jobStatus);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
-
+  const { scan, missing, settings, jobStatus, setActiveJobId, setJobStatus, connectionStatus, checkConnections } = useStore();
+  const checking = Object.values(connectionStatus).some(item => item.status === 'checking');
+  const [starting, setStarting] = useState(false);
   const summary = scan?.summary || {};
-  const diagnostics = scan?.diagnostics || {};
-  const unmatchedSeries = scan?.unmatched?.series || [];
-  const skippedSeries = diagnostics.skipped || [];
-  const comparedSeries = diagnostics.compared || [];
   const scannedAt = scan?.scannedAt;
-  const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
-
-  const startJob = async (type, recentOnly = false) => {
+  const ready = settings.ready || {};
+  const scanReady = ready.emby && ready.tmdb;
+  const busy = starting || (jobStatus && !['done','error'].includes(jobStatus.status));
+  const groups = useMemo(() => Object.values(missing.reduce((acc, item) => {
+    const key = `${item.tmdbId || 0}:${item.officialTitle || item.embyTitle}`;
+    if (!acc[key]) acc[key] = { key, title: item.officialTitle || item.embyTitle, poster: item.posterPath, count: 0, codes: [] };
+    acc[key].count++; acc[key].codes.push(item.code); return acc;
+  }, {})), [missing]);
+  const startScan = async (recentOnly = false) => {
+    setStarting(true);
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type, airedOnly: true, recentOnly }) });
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly }) });
       setActiveJobId(data.jobId);
-      setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
-    } catch (err) {
-      toast.error(err.message);
-    }
+      setJobStatus({ id: data.jobId, status: 'running', progress: 0, message: '准备扫描媒体库' });
+    } catch (err) { toast.error(err.message); } finally { setStarting(false); }
   };
-
+  const title = busy ? '正在核对你的媒体库' : !scanReady ? '好故事，值得一集不落。' : !scannedAt ? '从一次扫描开始。' : missing.length ? `还有 ${missing.length} 集，等待补齐。` : '本次扫描，暂无缺集。';
   return (
-    <div className="space-y-6">
-      {/* Progress Bar */}
+    <div className="page-stack">
+      <div className="page-heading">
+        <div><p className="eyebrow mb-2">EMBY ECER / OVERVIEW</p><h1 className="page-title">媒体库概览</h1><p className="page-description">发现缺失的剧集，交给 MoviePilot 补齐。</p></div>
+        <span className={busy ? 'pill-green' : 'pill'}><span className={`connection-dot ${busy || settings.scanAutoEnabled ? 'is-ready' : ''}`} />{busy ? '扫描进行中' : settings.scanAutoEnabled ? `每 ${settings.scanAutoInterval || 12} 小时自动扫描` : '手动扫描模式'}</span>
+      </div>
       <ProgressBar />
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-4">
-        <StatCard
-          label="缺集"
-          value={summary.totalMissingEpisodes ?? '--'}
-          icon={AlertTriangle}
-          accent
-        />
-        <StatCard
-          label="剧集"
-          value={summary.seriesScanned ?? '--'}
-          icon={Tv}
-        />
-        <StatCard
-          label="电影"
-          value={summary.movieTotal ?? '--'}
-          icon={Film}
-        />
-        <StatCard
-          label="重扫剧集"
-          value={summary.seriesRescanned ?? '--'}
-          icon={RefreshCw}
-        />
-        <StatCard
-          label="未匹配剧集"
-          value={summary.unmatchedSeries ?? '--'}
-          icon={AlertTriangle}
-        />
-      </div>
-
-      {/* Scan Actions */}
-      <div className="card overflow-hidden p-0">
-        <div className="bg-gradient-to-r from-primary-600 via-primary-500 to-blue-500 px-5 py-5 text-white">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-primary-100">Library Scan</p>
-              <h2 className="mt-1 text-2xl font-black tracking-tight">媒体库扫描中心</h2>
-              <p className="mt-2 text-sm text-blue-100">扫描 Emby 实际拥有数据，并与 TMDB 官方季集基准做差异比对。</p>
+      {(scan?.summary?.seriesNeedsReview ?? 0) > 0 && <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">{scan.summary.seriesNeedsReview} 部剧与 TMDB 编号不同，已单独检查资源编号。断号结果见下方，TMDB 缺集数仍待确认。<button type="button" className="ml-2 underline" onClick={() => { const section = document.getElementById('scan-diagnostics'); if (section) { section.open = true; section.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }}>查看编号检查</button></p>}
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_285px]">
+        <section className="hero-panel">
+          <div className="hero-copy">
+            <span className="inline-flex items-center gap-2 text-xs font-medium text-primary-700"><Radar size={15} />缺集扫描</span>
+            <h2 className="hero-title">{title}</h2>
+            <p className="max-w-sm text-sm leading-7 text-primary-700/75">{!scanReady ? '连接 Emby 与 TMDB，准确找出已播出但尚未入库的剧集。' : busy ? '扫描在后台继续，你可以随时查看结果。' : missing.length ? `${groups.length} 部剧集存在缺口，匹配资源后即可提交下载。` : '按官方季集信息逐一核对，让补片更有把握。'}</p>
+            <div className="mt-6 flex flex-wrap items-center gap-2.5">
+              {!scanReady ? <Link to="/settings" className="btn-primary">配置扫描连接<ArrowRight size={16} /></Link> : <button onClick={() => startScan(false)} disabled={busy} className="btn-primary"><Radar size={16} />{busy ? '扫描中…' : '全量扫描'}</button>}
+              {scannedAt && <button onClick={() => startScan(true)} disabled={busy || !scanReady} className="btn-outline !border-primary-200 !bg-white/60"><RefreshCw size={15} />增量扫描</button>}
             </div>
-            <div className="hidden sm:flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/15 backdrop-blur">
-              <Radar className="w-6 h-6" />
-            </div>
+            <p className="mt-5 flex items-center gap-1.5 text-xs text-primary-700/65"><Clock3 size={13} />{scannedAt ? `上次扫描 ${new Date(scannedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}` : '尚未开始首次扫描'}</p>
           </div>
-        </div>
-        <div className="px-5 py-4 space-y-4">
-          <div className="flex items-center gap-2 text-sm text-gray-500">
-            <Clock className="w-4 h-4" />
-            <span>上次扫描：{scannedAt ? new Date(scannedAt).toLocaleString('zh-CN') : '尚未扫描'}{summary.scanMode === 'recent' ? ' · 最近变更模式' : summary.scanMode === 'full' ? ' · 全量增量模式' : ''}</span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button
-              onClick={() => startJob('scan', false)}
-              disabled={busy}
-              className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
-            >
-              <Radar className="w-4 h-4" />
-              全量扫描
-            </button>
-            <button
-              onClick={() => startJob('scan', true)}
-              disabled={busy || !scannedAt}
-              title={scannedAt ? '只重扫上次扫描后有变动的剧集，其余沿用上次结果' : '先做一次全量扫描'}
-              className="btn-outline w-full flex items-center justify-center gap-2 text-sm"
-            >
-              <RefreshCw className="w-4 h-4" />
-              增量扫描
-            </button>
-          </div>
-        </div>
+          <RadarArt />
+        </section>
+        <section className="card !py-5">
+          <div className="flex items-center justify-between"><h2 className="section-title">连接状态</h2><div className="flex items-center gap-2"><button type="button" onClick={checkConnections} disabled={checking} className="icon-button !h-7 !w-7" aria-label="重新检测连接" title="重新检测连接"><RefreshCw size={14} className={checking ? 'animate-spin' : ''} /></button><Link to="/settings" className="text-gray-400 hover:text-primary-600" aria-label="管理服务连接"><ArrowUpRight size={17} /></Link></div></div>
+          {[[Server,'emby','Emby','媒体库来源'],[BadgeCheck,'tmdb','TMDB','官方季集信息'],[Download,'mp','MoviePilot','资源搜索与下载']].map(([Icon,key,name,desc]) => <div className="connection-row" key={key}><span className="connection-icon"><Icon size={17} /></span><div className="min-w-0 flex-1"><p className="text-sm font-medium">{name}</p><p className="mt-0.5 text-[11px] text-gray-400">{desc}</p>{connectionStatus[key]?.status === 'failed' && <p className="mt-1 break-words text-[11px] leading-4 text-red-500">{connectionStatus[key].error}</p>}</div><ConnectionBadge connection={connectionStatus[key]} /></div>)}
+          <p className="mt-3 text-[11px] leading-5 text-gray-400">使用已保存的配置检测，每分钟自动刷新。</p>
+        </section>
       </div>
-
-      <details className="card space-y-4">
-        <summary className="cursor-pointer list-none">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-bold text-gray-900">扫描诊断</h2>
-            <p className="mt-1 text-xs text-gray-400">查看重扫、未匹配数量，以及被跳过的剧集原因。</p>
-          </div>
-          <Activity className="h-5 w-5 text-gray-400" />
-        </div>
-        </summary>
-        <div className="mt-4 space-y-4">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">对比剧集</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.comparedSeries ?? comparedSeries.length ?? 0}</div>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">真正重扫</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.rescannedSeries ?? summary.seriesRescanned ?? 0}</div>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">未匹配</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.unmatchedSeries ?? summary.unmatchedSeries ?? 0}</div>
-          </div>
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-xs font-bold text-gray-500">跳过项目</div>
-            <div className="mt-1 text-xl font-extrabold text-gray-900">{diagnostics.skippedCount ?? skippedSeries.length ?? 0}</div>
-          </div>
-        </div>
-
-        <details>
-          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看被跳过剧集</summary>
-          <div className="mt-3 space-y-2">
-            {skippedSeries.length === 0 ? (
-              <p className="text-sm text-gray-500">本次没有被跳过的剧集。</p>
-            ) : (
-              skippedSeries.map((item, i) => (
-                <div key={`${item.id || item.name || 'skip'}-${i}`} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-gray-900">{item.name || '未知剧集'}</p>
-                      <p className="mt-1 text-xs text-gray-500">{item.reason || '无原因'}</p>
-                    </div>
-                    <span className="shrink-0 rounded-full border border-gray-200 bg-white px-2 py-1 text-[11px] font-bold text-gray-500">{item.action || 'skip'}</span>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </details>
-
-        <details>
-          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看未匹配剧集</summary>
-          <div className="mt-3 space-y-2">
-            {unmatchedSeries.length === 0 ? (
-              <p className="text-sm text-gray-500">本次没有未匹配的剧集。</p>
-            ) : (
-              unmatchedSeries.map((item, i) => (
-                <div key={`${item.id || item.name || 'unmatched'}-${i}`} className="rounded-lg border border-red-200 bg-red-50 px-3 py-3">
-                  <p className="truncate text-sm font-bold text-red-900">{item.name || '未知剧集'}</p>
-                  <p className="mt-1 text-xs text-red-700">{item.reason || '未提供原因'}</p>
-                </div>
-              ))
-            )}
-          </div>
-        </details>
-
-        <details>
-          <summary className="cursor-pointer list-none text-sm font-bold text-gray-700">查看已匹配比对剧集</summary>
-          <div className="mt-3 space-y-2">
-            {comparedSeries.length === 0 ? (
-              <p className="text-sm text-gray-500">暂无已匹配比对明细。</p>
-            ) : (
-              comparedSeries.map((item, i) => (
-                <div key={`${item.id || item.name || 'compared'}-${i}`} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-gray-900">{item.name || '未知剧集'}</p>
-                      <p className="mt-1 text-xs text-gray-500">
-                        TMDB：{item.tmdbName || item.tmdbId || '未知'}{item.tmdbYear ? ` · ${item.tmdbYear}` : ''}
-                      </p>
-                      <p className="mt-1 text-xs text-gray-500">{item.reason || '已完成比对'}</p>
-                    </div>
-                    <div className="shrink-0 text-right text-[11px] font-bold text-gray-500 leading-5">
-                      <div>Emby {item.embyEpisodes ?? 0}</div>
-                      <div>TMDB {item.tmdbEpisodes ?? 0}</div>
-                      <div className={item.missingEpisodes > 0 ? 'text-red-600' : 'text-emerald-600'}>缺 {item.missingEpisodes ?? 0}</div>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </details>
-        </div>
-      </details>
-
-      {/* Recent Missing */}
-      <div className="card">
-        <details>
-          <summary className="cursor-pointer list-none">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <h2 className="text-base font-bold text-gray-900">最近缺失</h2>
-                <p className="mt-1 text-xs leading-5 text-gray-400">快速查看最近一次扫描发现的剧集缺口</p>
-              </div>
-              <div className="flex shrink-0 items-center gap-3 pt-0.5">
-                <span className="inline-flex min-w-[56px] items-center justify-center rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-bold text-red-700">
-                  {missing.length} 集
-                </span>
-                <button
-                  onClick={(e) => { e.preventDefault(); navigate('/missing'); }}
-                  className="inline-flex items-center gap-1 text-sm font-bold text-primary-600 hover:text-primary-700"
-                >
-                  查看全部
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </summary>
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {missing.length === 0 ? (
-              <p className="text-sm text-gray-500 py-4 text-center sm:col-span-2">还没有扫描结果，点击上方开始扫描</p>
-            ) : (
-              missing.slice(0, 5).map((item, i) => (
-                <div key={i} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-3 border border-gray-100">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-bold text-gray-900">{item.officialTitle || item.embyTitle}</p>
-                    <p className="text-xs text-gray-500">{item.code} · {item.episodeName || '未命名'}</p>
-                  </div>
-                  <span className="shrink-0 ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-200">
-                    缺失
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </details>
+      <div className="metrics-strip">
+        <StatCard label="待补齐集数" value={scannedAt ? missing.length : '—'} note="已播出 · 尚未入库" accent={missing.length > 0} />
+        <StatCard label="涉及剧集" value={scannedAt ? groups.length : '—'} note="存在缺集的剧集" />
+        <StatCard label="已扫描剧集" value={scannedAt ? summary.seriesScanned ?? 0 : '—'} note="本次扫描范围" />
+        <StatCard label="待确认剧集" value={scannedAt ? (summary.unmatchedSeries ?? 0) + (summary.seriesNeedsReview ?? 0) : '—'} note="匹配或编号需核对" />
       </div>
+      <section>
+        <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="section-title">待补齐的剧集</h2><p className="mt-1 text-xs text-gray-400">从一个缺口开始，让媒体库更完整。</p></div><Link to="/missing" className="btn-ghost !px-0">查看全部<ArrowRight size={16} /></Link></div>
+        {groups.length ? <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white divide-y divide-gray-100">{groups.slice(0,5).map(group => <button key={group.key} onClick={() => navigate('/missing?title=' + encodeURIComponent(group.title))} className="flex w-full items-center gap-4 px-5 py-4 text-left transition-colors hover:bg-gray-50"><div className="flex h-14 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md bg-gray-100 text-gray-400">{group.poster ? <img src={'https://image.tmdb.org/t/p/w92' + group.poster} alt="" className="h-full w-full object-cover" /> : <Film size={21} />}</div><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{group.title}</p><p className="mt-1 truncate text-xs text-gray-400">{group.codes.slice(0,4).join(' · ')}{group.codes.length > 4 ? ' …' : ''}</p></div><span className="pill-amber shrink-0">缺 {group.count} 集</span><ArrowUpRight size={16} className="hidden text-gray-400 sm:block" /></button>)}</div> : <div className="empty-state !py-10"><span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary-50 text-primary-500">{scannedAt ? <Check size={24} /> : <ListChecks size={24} />}</span><h3 className="text-sm font-medium">{scannedAt ? '当前没有待补齐的剧集' : '扫描完成后，缺集会出现在这里'}</h3><p className="mt-2 text-xs leading-6 text-gray-400">{scannedAt ? '未匹配的剧集仍可在下方诊断中检查。' : '支持全量扫描、增量扫描和单剧重扫。'}</p></div>}
+      </section>
+      {scannedAt && <ScanDiagnostics scan={scan} />}
     </div>
   );
 }

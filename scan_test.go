@@ -69,17 +69,17 @@ func newScanFixture(t *testing.T) *scanFixture {
 		switch r.URL.Path {
 		case "/tv/101":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": 101, "name": "合并集剧", "first_air_date": "2020-01-01",
+				"id": 101, "name": "合并集剧", "first_air_date": "2020-01-01", "status": "Ended",
 				"seasons": []map[string]any{{"season_number": 1, "episode_count": 4}},
 			})
 		case "/tv/102":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": 102, "name": "完整剧", "first_air_date": "2021-01-01",
+				"id": 102, "name": "完整剧", "first_air_date": "2021-01-01", "status": "Ended",
 				"seasons": []map[string]any{{"season_number": 1, "episode_count": 2}},
 			})
 		case "/tv/103":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": 103, "name": "被屏蔽剧", "first_air_date": "2022-01-01",
+				"id": 103, "name": "被屏蔽剧", "first_air_date": "2022-01-01", "status": "Ended",
 				"seasons": []map[string]any{{"season_number": 1, "episode_count": 3}},
 			})
 		default:

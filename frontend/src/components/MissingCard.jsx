@@ -1,43 +1,42 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import useStore from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
-import { Search, Download, X, RefreshCw, Sparkles } from 'lucide-react';
-import SearchResults from './SearchResults';
+import { Search, X, RefreshCw, Film, ArrowUpRight, Check, Download, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import Modal from './Modal';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w342';
 
 export default function MissingCard({ group, selectable = false, selected = false, onToggleSelect, onIgnore, onIgnoreEpisode }) {
-  const seriesKey = `series:${group.tmdbId || group.key}`;
-  const search = useStore(s => s.seriesSearches[seriesKey]);
-  const setSeriesSearch = useStore(s => s.setSeriesSearch);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
-  const jobStatus = useStore(s => s.jobStatus);
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [activeSource, setActiveSource] = useState('mp');
+  const [selectedSeason, setSelectedSeason] = useState(null);
   const [mpPage, setMpPage] = useState(1);
-  const pageSize = 20;
-
-  const totalEps = group.totalEpisodes || 0;
-  const ownedEps = group.ownedEpisodes || 0;
-  const healthPct = totalEps > 0 ? Math.round((ownedEps / totalEps) * 100) : 0;
-  const missingEps = (group.items || []).length;
-  const codes = (group.codes || []).join('、');
-  const codeList = group.codes || [];
-  const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
-
-  // 一部剧可能跨季缺集，取缺得最多的那一季作为搜索目标
+  const [downloads, setDownloads] = useState({});
   const seasonBuckets = {};
   for (const item of group.items || []) {
     const season = item.season || 0;
     if (!seasonBuckets[season]) seasonBuckets[season] = [];
     if (item.episode) seasonBuckets[season].push(item.episode);
   }
-  const seasonKeys = Object.keys(seasonBuckets).filter(k => Number(k) > 0);
-  seasonKeys.sort((a, b) => seasonBuckets[b].length - seasonBuckets[a].length);
-  const searchSeason = seasonKeys.length ? Number(seasonKeys[0]) : 0;
-  const searchEpisodes = searchSeason ? seasonBuckets[String(searchSeason)] : [];
+  const seasonKeys = Object.keys(seasonBuckets).filter(k => Number(k) > 0).sort((a,b) => seasonBuckets[b].length - seasonBuckets[a].length);
+  const searchSeason = selectedSeason != null && seasonBuckets[selectedSeason] ? selectedSeason : Number(seasonKeys[0] || 0);
+  const searchEpisodes = seasonBuckets[searchSeason] || [];
+  const codeList = (group.items || []).filter(item => item.season === searchSeason).map(item => item.code);
+  const seriesKey = `series:${group.tmdbId || group.key}:s${searchSeason}`;
+  const search = useStore(s => s.seriesSearches[seriesKey]);
+  const setSeriesSearch = useStore(s => s.setSeriesSearch);
+  const setActiveJobId = useStore(s => s.setActiveJobId);
+  const setJobStatus = useStore(s => s.setJobStatus);
+  const jobStatus = useStore(s => s.jobStatus);
+  const mpReady = useStore(s => !!s.settings.ready?.mp);
+  const busy = jobStatus && !['done','error'].includes(jobStatus.status);
+  const totalEps = group.totalEpisodes || 0;
+  const ownedEps = group.ownedEpisodes || 0;
+  const healthPct = totalEps > 0 ? Math.min(100, Math.round(ownedEps / totalEps * 100)) : 0;
+  const missingEps = (group.items || []).length;
+  const pageSize = 20;
 
   const rescanSeries = async () => {
     if (!group.embySeriesId) {
@@ -77,37 +76,11 @@ export default function MissingCard({ group, selectable = false, selected = fals
     }
   };
 
-  const doSearch = async () => {
-    setActiveSource('pan');
-    setSeriesSearch(seriesKey, prev => ({ ...prev, loading: true, codes }));
-    try {
-      const data = await api('/api/search', { method: 'POST', body: JSON.stringify({ keyword: group.title, season: searchSeason, episodes: searchEpisodes }) });
-      setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, results: data.results || [], query: data.query, codes }));
-    } catch (err) {
-      setSeriesSearch(seriesKey, prev => ({ ...prev, loading: false, error: err.message, codes }));
-    }
-  };
-
-  const doHDHiveSearch = async () => {
-    setActiveSource('hdhive');
-    setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: true, codes }));
-    try {
-      const data = await api('/api/hdhive/search', {
-        method: 'POST',
-        body: JSON.stringify({ keyword: group.title, mediaType: 'tv', tmdbId: group.tmdbId || 0, season: searchSeason, episodes: searchEpisodes }),
-      });
-      const previous = search?.results || [];
-      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, results: [...(prev?.results || previous), ...(data.results || [])], query: group.title, codes }));
-    } catch (err) {
-      setSeriesSearch(seriesKey, prev => ({ ...prev, hdhiveLoading: false, error: err.message, codes }));
-    }
-  };
-
   const doMPSearch = async () => {
-    setActiveSource('mp');
+    setMpPage(1);
     const keywords = [group.title];
     if (group.tmdbId) keywords.unshift(`tmdb:${group.tmdbId}`);
-    setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpKeywords: keywords }));
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: true, mpError: '', mpKeywords: keywords }));
     try {
       const body = { keyword: group.title, season: searchSeason, episodes: searchEpisodes };
       if (group.tmdbId) body.tmdbId = String(group.tmdbId);
@@ -124,16 +97,53 @@ export default function MissingCard({ group, selectable = false, selected = fals
         match: r.match || null,
         raw: r,
       }));
-      setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpResults: items, query: group.title }));
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpResults: items, mpError: (data.errors || []).join('；'), query: group.title }));
     } catch (err) {
       setSeriesSearch(seriesKey, prev => ({ ...prev, mpLoading: false, mpError: err.message }));
     }
   };
 
   const doMPDownload = async (item) => {
+    const key = item.url || item.title;
+    setDownloads(prev => ({ ...prev, [key]: { loading: true } }));
     try {
-      await api('/api/mp/download', { method: 'POST', body: JSON.stringify({ rawData: item.raw, tmdbId: String(group.tmdbId || '') }) }); toast.success('已提交下载'); }
-    catch (err) { toast.error(err.message); }
+      await api('/api/mp/download', { method: 'POST', body: JSON.stringify({ rawData: item.raw, tmdbId: String(group.tmdbId || '') }) });
+      setDownloads(prev => ({ ...prev, [key]: { done: true } }));
+      toast.success('已提交 MoviePilot 下载');
+    } catch (err) {
+      setDownloads(prev => ({ ...prev, [key]: { error: err.message } }));
+      toast.error(err.message);
+    }
+  };
+
+  const loadMPSubscribeStatus = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: true, mpSubscribeError: '' }));
+    try {
+      const data = await api('/api/mp/subscribe/status', {
+        method: 'POST',
+        body: JSON.stringify({ tmdbId: String(group.tmdbId), mediaType: 'tv', season: searchSeason }),
+      });
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: false, mpSubscribeStatus: data }));
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeLoading: false, mpSubscribeError: err.message }));
+    }
+  };
+
+  const doMPSubscribe = async () => {
+    setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeSending: true, mpSubscribeError: '' }));
+    try {
+      await api('/api/mp/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ tmdbId: String(group.tmdbId), mediaType: 'tv', season: searchSeason, title: group.title }),
+      });
+      toast.success('已发送到 MoviePilot 订阅');
+      await loadMPSubscribeStatus();
+    } catch (err) {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeError: err.message }));
+      toast.error(err.message);
+    } finally {
+      setSeriesSearch(seriesKey, prev => ({ ...prev, mpSubscribeSending: false }));
+    }
   };
 
   const matchCode = (r) => {
@@ -166,8 +176,6 @@ export default function MissingCard({ group, selectable = false, selected = fals
     return false;
   };
 
-  const matchType = (r) => matchCode(r);
-
   const MatchTags = ({ result }) => {
     const m = result.match;
     if (!m) return null;
@@ -182,7 +190,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
     return (
       <div className="mt-1 flex flex-wrap gap-1">
         {chips.map((chip, i) => (
-          <span key={i} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold ${chip.tone}`}>{chip.text}</span>
+          <span key={i} className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-bold ${chip.tone}`}>{chip.text}</span>
         ))}
       </div>
     );
@@ -190,209 +198,43 @@ export default function MissingCard({ group, selectable = false, selected = fals
 
   const allMP = search?.mpResults || [];
   const totalPages = Math.max(1, Math.ceil(allMP.length / pageSize));
-  const pageMP = allMP.slice((mpPage - 1) * pageSize, mpPage * pageSize);
+  const currentPage = Math.min(mpPage, totalPages);
+  const pageMP = allMP.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const matchedMP = pageMP.filter(r => matchCode(r) !== false);
   const unmatchedMP = pageMP.filter(r => matchCode(r) === false);
-  const matchedAll = allMP.filter(r => matchCode(r) !== false).length;
-  const panResults = search?.results || [];
-  const hdhiveResults = panResults.filter(r => r.source === 'HDHive');
-  const pansouResults = panResults.filter(r => r.source !== 'HDHive');
-  const visiblePanResults = activeSource === 'hdhive' ? hdhiveResults : pansouResults;
-  const matchedPan = visiblePanResults.filter(r => matchCode(r) !== false);
-  const unmatchedPan = visiblePanResults.filter(r => matchCode(r) === false);
-
-  // Poster Card
+  const renderTorrent = (result, i) => {
+    const state = downloads[result.url || result.title];
+    const matched = matchCode(result);
+    return <div key={(result.url || result.title) + i} className={`result-row ${matched ? 'is-match' : ''}`}><div className="flex flex-col gap-3 sm:flex-row sm:items-start"><div className="min-w-0 flex-1"><p className="break-words text-sm font-medium leading-6">{result.title}</p>{result.description && <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-gray-500">{result.description}</p>}<p className="mt-1 text-xs text-gray-400">{result.source || 'MoviePilot'}{result.size ? ` · ${result.size}` : ''}{result.seeders ? ` · ${result.seeders} 做种` : ''}</p><MatchTags result={result} /></div><button onClick={() => doMPDownload(result)} disabled={state?.loading || state?.done} className="btn-outline shrink-0 !min-h-9 !px-3 !py-1.5 !text-xs">{state?.loading ? <Loader2 size={14} className="animate-spin" /> : state?.done ? <Check size={14} /> : <Download size={14} />}{state?.loading ? '提交中' : state?.done ? '已发送' : '下载'}</button></div>{state?.error && <p className="mt-2 break-words text-xs text-red-600">{state.error}</p>}</div>;
+  };
   return (
     <>
-      <div onClick={() => selectable ? onToggleSelect?.(group) : setOpen(true)} className={`bg-white rounded-lg border shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow ${selected ? 'border-primary-500 ring-2 ring-primary-100' : 'border-gray-200'}`}>
-        <div className="relative aspect-[2/3] bg-gray-100">
-          {selectable && (
-            <div className="absolute left-2 top-2 z-10 h-5 w-5 rounded border-2 border-white bg-white/90 shadow flex items-center justify-center">
-              {selected && <div className="h-2.5 w-2.5 rounded-sm bg-primary-600" />}
-            </div>
-          )}
-          {group.posterPath ? (
-            <img src={TMDB_IMG + group.posterPath} className="w-full h-full object-cover" loading="lazy" alt="" />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-4xl text-gray-300">🎬</div>
-          )}
-          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
-          <span className={`absolute top-2 right-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${healthPct >= 100 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
-            {healthPct >= 100 ? '完整' : '缺失'}
-          </span>
-          {!selectable && onIgnore && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onIgnore(group); }}
-              className="absolute left-2 top-2 z-10 rounded-full border border-white/70 bg-white/90 px-2 py-0.5 text-[10px] font-bold text-gray-600 shadow hover:text-red-500"
-            >
-              忽略
-            </button>
-          )}
-          {totalEps > 0 && (
-            <div className="absolute bottom-0 left-0 right-0 p-2">
-              <div className="h-1 w-full rounded-full bg-white/30 mb-1">
-                <div className={`h-full rounded-full ${healthPct >= 80 ? 'bg-emerald-400' : healthPct >= 50 ? 'bg-amber-400' : 'bg-red-400'}`} style={{ width: `${Math.max(healthPct, 5)}%` }} />
-              </div>
-              <div className="flex items-center justify-between text-white text-[10px] font-semibold">
-                <span>{ownedEps}/{totalEps}集</span>
-                <span>{healthPct}%</span>
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="px-2.5 py-2">
-          <p className="text-xs font-bold text-gray-900 truncate">{group.title}</p>
-          <p className="text-[10px] text-red-500 mt-0.5">缺{missingEps}集</p>
-        </div>
-      </div>
-
-      {/* Modal */}
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center pt-8 px-4 pb-8 overflow-y-auto" onClick={() => setOpen(false)}>
-          <div className="fixed inset-0 bg-black/40" />
-          <div className="relative bg-white rounded-lg shadow-2xl w-full max-w-5xl my-auto" onClick={e => e.stopPropagation()}>
-            <div className="flex items-start gap-3 p-4 border-b border-gray-100">
-              {group.posterPath ? (
-                <img src={TMDB_IMG + group.posterPath} className="w-14 h-[83px] rounded object-cover shrink-0 bg-gray-100" alt="" />
-              ) : (
-                <div className="w-14 h-[83px] rounded bg-gray-100 shrink-0 flex items-center justify-center text-xl">🎬</div>
-              )}
-              <div className="min-w-0 flex-1">
-                <h2 className="text-base font-bold text-gray-900">{group.title}</h2>
-                <p className="text-xs text-gray-400 mt-0.5">TMDB {group.tmdbId || ''}</p>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-red-500 font-semibold">缺{missingEps}集</span>
-                  {totalEps > 0 && <span className="text-xs text-gray-400">{ownedEps}/{totalEps}集 · {healthPct}%</span>}
-                </div>
-                <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                  <span className="text-xs text-gray-500">缺失集号：</span>
-                  {(group.items || []).map(item => (
-                    <span key={item.id || item.code} className="inline-flex items-center gap-1 rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[10px] font-bold text-gray-600">
-                      {item.code}
-                      <button type="button" title="忽略这一集，扫描时不再列出" onClick={() => ignoreEpisode(item)} className="leading-none text-gray-300 hover:text-red-500">×</button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="shrink-0 flex items-center gap-1">
-                <button title="重新扫描此剧" onClick={rescanSeries} disabled={busy || !group.embySeriesId} className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed">
-                  <RefreshCw className={`w-4 h-4 text-gray-400 ${busy ? 'animate-spin' : ''}`} />
-                </button>
-                <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100"><X className="w-5 h-5 text-gray-400" /></button>
-              </div>
-            </div>
-            <div className="px-4 py-3 border-b border-gray-100">
-              <div className="grid grid-cols-3 gap-2">
-                <button type="button" onClick={doMPSearch} disabled={!!search?.mpLoading} className="flex items-center justify-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-600 hover:border-primary-400 hover:text-primary-600 disabled:opacity-50">
-                  <Download className="w-4 h-4" /> {search?.mpLoading ? 'MP搜索中...' : 'MP 搜索'}
-                </button>
-                <button type="button" onClick={doHDHiveSearch} disabled={!!search?.hdhiveLoading} className="flex items-center justify-center gap-1.5 rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50">
-                  <Sparkles className="w-4 h-4" /> {search?.hdhiveLoading ? 'HDHive 搜索中...' : 'HDHive 搜索'}
-                </button>
-                <button type="button" onClick={doSearch} disabled={!!search?.loading} className="btn-primary flex items-center justify-center gap-1.5 text-sm disabled:opacity-50">
-                  <Search className="w-4 h-4" /> {search?.loading ? '盘搜中...' : '盘搜搜索'}
-                </button>
-              </div>
-              <div className="mt-2 flex flex-wrap items-center justify-start gap-3 text-xs font-bold">
-                <button type="button" onClick={() => setActiveSource('mp')} className={`${activeSource === 'mp' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>MP{allMP.length ? ` · ${allMP.length}` : ''}</button>
-                <button type="button" onClick={() => setActiveSource('hdhive')} className={`${activeSource === 'hdhive' ? 'text-amber-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>HDHive · {panResults.filter(r => r.source === 'HDHive').length}</button>
-                <button type="button" onClick={() => setActiveSource('pan')} className={`${activeSource === 'pan' ? 'text-primary-700 underline decoration-2 underline-offset-4' : 'text-gray-400 hover:text-gray-600'}`}>盘搜 · {panResults.filter(r => r.source !== 'HDHive').length}</button>
-              </div>
-            </div>
-            <div className="px-4 pb-4 max-h-[60vh] overflow-y-auto">
-              {activeSource === 'mp' && (
-                <>
-                  {search?.mpKeywords && (
-                    <div className="flex flex-wrap gap-1 mb-2">
-                      {search.mpKeywords.map((kw, i) => <span key={i} className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 text-[10px] font-semibold border border-primary-200">{kw}</span>)}
-                    </div>
-                  )}
-                  {search?.mpError && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.mpError}</p></div>}
-                  {!search?.mpLoading && search?.mpResults !== undefined && (
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-gray-400">MP结果 · {allMP.length} 条{totalPages > 1 ? ` · ${mpPage}/${totalPages}页` : ''}</p>
-                      {totalPages > 1 && (
-                        <div className="flex gap-1">
-                          <button type="button" onClick={() => setMpPage(p => Math.max(1, p-1))} disabled={mpPage <= 1} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">上一页</button>
-                          <button type="button" onClick={() => setMpPage(p => Math.min(totalPages, p+1))} disabled={mpPage >= totalPages} className="text-[10px] font-semibold px-2 py-0.5 rounded border border-gray-200 disabled:opacity-30 hover:bg-gray-100">下一页</button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {matchedMP.length > 0 && (
-                    <div className="mb-3">
-                      <p className="text-xs font-bold text-gray-400 mb-1.5">MP匹配 · {matchedAll}条</p>
-                      <div className="space-y-1.5">
-                        {matchedMP.map((r, i) => {
-                          const mt = matchType(r);
-                          return (
-                            <div key={'mmp'+i} className="rounded-md p-2.5 border border-emerald-200 bg-emerald-50/30">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0 flex-1">
-                                  <p className="text-sm font-medium text-gray-800"><span className={`inline-flex items-center rounded text-xs font-bold px-1.5 py-0.5 mr-1 ${mt === 'include' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{mt === 'include' ? '包含' : '✓'}</span>{r.title}</p>
-                                  {r.description && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{r.description}</p>}
-                                  <p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}{r.seeders ? ` · ${r.seeders}↑` : ''}</p>
-                                  <MatchTags result={r} />
-                                </div>
-                                <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-700">下载</button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                  {unmatchedMP.length > 0 && (
-                    matchedMP.length === 0 ? (
-                      <div className="mt-1 space-y-1.5">
-                        {unmatchedMP.map((r, i) => (
-                          <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p><MatchTags result={r} /></div>
-                              <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <details>
-                        <summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">MP未匹配 · {unmatchedMP.length}条</summary>
-                        <div className="mt-1 space-y-1.5">
-                          {unmatchedMP.map((r, i) => (
-                            <div key={'ump'+i} className="rounded-md p-2 border border-gray-100 bg-gray-50">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{r.title}</p>{r.description && <p className="text-xs text-gray-400 mt-0.5">{r.description}</p>}<p className="text-xs text-gray-400 mt-0.5">{r.source}{r.size ? ` · ${r.size}` : ''}</p><MatchTags result={r} /></div>
-                                <button type="button" onClick={() => doMPDownload(r)} className="shrink-0 text-xs text-primary-600">下载</button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )
-                  )}
-                  {allMP.length === 0 && matchedMP.length === 0 && unmatchedMP.length === 0 && !search?.mpLoading && search?.mpResults !== undefined && <p className="text-xs text-gray-400 py-2">MP无匹配结果</p>}
-                  {search?.mpLoading && <p className="text-sm text-gray-400 py-2">MP搜索中...</p>}
-                </>
-              )}
-
-              {activeSource !== 'mp' && (
-                <>
-                  {activeSource === 'hdhive' && search?.hdhiveLoading && <p className="text-sm text-gray-400 py-2">HDHive 搜索中...</p>}
-                  {activeSource === 'pan' && search?.loading && <p className="text-sm text-gray-400 py-2">盘搜中...</p>}
-                  {search?.error && <div className="rounded-md bg-red-50 border border-red-200 p-2.5 mb-2"><p className="text-sm font-semibold text-red-600">{search.error}</p></div>}
-                  {visiblePanResults.length > 0 ? (
-                    <div className="mt-3">
-                      {matchedPan.length > 0 && <div className="mb-2"><p className="text-xs font-bold text-gray-400 mb-1.5">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}匹配 · {matchedPan.length}条</p><SearchResults search={{ ...search, results: matchedPan }} /></div>}
-                      {unmatchedPan.length > 0 && (matchedPan.length === 0 ? <div><p className="text-xs font-bold text-gray-400 mb-1.5">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}结果 · {unmatchedPan.length}条</p><SearchResults search={{ ...search, results: unmatchedPan }} /></div> : <details><summary className="cursor-pointer text-xs font-bold text-gray-400 hover:text-gray-600 py-1">{activeSource === 'hdhive' ? 'HDHive' : '盘搜'}未匹配 · {unmatchedPan.length}条</summary><div className="mt-1"><SearchResults search={{ ...search, results: unmatchedPan }} /></div></details>)}
-                    </div>
-                  ) : (!search?.loading && !search?.hdhiveLoading && <p className="text-sm text-gray-400 py-3 text-center">这一栏还没有结果，点击上方按钮搜索。</p>)}
-                </>
-              )}
-            </div>
+      <article className={`series-card ${selected ? 'is-selected' : ''}`}>
+        <button onClick={() => selectable ? onToggleSelect?.(group) : setOpen(true)} aria-label={`${selectable ? '选择' : '查看'} ${group.title}`} aria-pressed={selectable ? selected : undefined} className="block w-full text-left">
+          <div className="relative aspect-[3/4] overflow-hidden bg-gray-100">
+            {group.posterPath ? <img src={TMDB_IMG + group.posterPath} loading="lazy" alt="" className="h-full w-full object-cover" /> : <div className="poster-placeholder h-full w-full"><Film size={44} strokeWidth={1} /></div>}
+            <span className="absolute right-2.5 top-2.5 rounded-lg bg-white/95 px-2 py-1 text-[11px] font-medium text-amber-700">缺 {missingEps} 集</span>
+            {selectable && <span className={`absolute left-2.5 top-2.5 flex h-6 w-6 items-center justify-center rounded-md border border-white ${selected ? 'bg-primary-600 text-white' : 'bg-white/90'}`}>{selected && <Check size={15} />}</span>}
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/45 to-transparent px-3 pb-2 pt-8"><p className="text-[11px] font-medium text-white">{totalEps ? `${ownedEps} / ${totalEps} 集 · ${healthPct}%` : '等待补齐'}</p></div>
           </div>
+          <div className="px-3 pb-3.5 pt-3"><h3 className="line-clamp-2 min-h-10 text-sm font-medium leading-5">{group.title}</h3><div className="mt-2 flex items-center justify-between text-[11px] text-gray-400"><span>{seasonKeys.length ? `${seasonKeys.length} 季存在缺集` : `${missingEps} 集待补齐`}</span><ArrowUpRight size={14} /></div>{totalEps > 0 && <div className="mt-3 h-1 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-400" style={{width: `${healthPct}%`}} /></div>}</div>
+        </button>
+        {!selectable && onIgnore && <button onClick={() => onIgnore(group)} className="absolute left-2.5 top-2.5 rounded-lg bg-black/25 px-2 py-1 text-[11px] text-white backdrop-blur-sm hover:bg-black/50" aria-label={`忽略 ${group.title}`}>忽略</button>}
+      </article>
+      {open && <Modal title={group.title} description={`缺 ${missingEps} 集${totalEps ? ` · 已有 ${ownedEps} / ${totalEps} 集` : ''}`} onClose={() => setOpen(false)}>
+        <div className="space-y-6">
+          <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><span className="pill">TMDB {group.tmdbId || '未匹配'}</span><span className="pill-amber">待补齐 {missingEps} 集</span></div><button onClick={rescanSeries} disabled={busy || !group.embySeriesId} className="btn-ghost !min-h-8 !py-1 !text-xs"><RefreshCw size={14} />单剧重扫</button></div>
+          <section><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-sm font-medium">缺失集号</h3>{seasonKeys.length > 0 && <select aria-label="选择搜索季" value={searchSeason} onChange={e => { setSelectedSeason(Number(e.target.value)); setMpPage(1); }} className="field !min-h-9 !w-auto !py-1.5 !text-xs">{[...seasonKeys].sort((a,b) => Number(a)-Number(b)).map(key => <option key={key} value={key}>第 {key} 季 · 缺 {seasonBuckets[key].length} 集</option>)}</select>}</div><div className="flex flex-wrap gap-2">{(group.items || []).filter(item => !searchSeason || item.season === searchSeason).map(item => <span key={item.id || item.code} className="inline-flex items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800">{item.code}<button onClick={() => ignoreEpisode(item)} aria-label={`忽略 ${item.code}`} className="ml-1 rounded p-0.5 text-amber-500 hover:bg-amber-100 hover:text-amber-800"><X size={12} /></button></span>)}</div></section>
+          <section className="rounded-2xl border border-gray-200 p-4 sm:p-5">
+            <div className="mb-4"><h3 className="text-sm font-semibold">通过 MoviePilot 补齐</h3><p className="mt-1 text-xs leading-6 text-gray-500">{searchSeason ? `搜索第 ${searchSeason} 季，优先展示命中缺集的资源。` : '搜索资源，或将剧集交给 MoviePilot 持续追踪。'}</p></div>
+            {mpReady ? <div className="flex flex-wrap gap-2"><button onClick={doMPSearch} disabled={!!search?.mpLoading} className="btn-primary"><Search size={16} />{search?.mpLoading ? '搜索中…' : '搜索资源'}</button><button onClick={doMPSubscribe} disabled={!group.tmdbId || !!search?.mpSubscribeSending} className="btn-outline">{search?.mpSubscribeSending ? '发送中…' : '发送到 MP 订阅'}</button><button onClick={loadMPSubscribeStatus} disabled={!group.tmdbId || !!search?.mpSubscribeLoading} className="btn-ghost">{search?.mpSubscribeLoading ? '查询中…' : '查询订阅'}</button></div> : <button onClick={() => { setOpen(false); navigate('/settings'); }} className="btn-primary">连接 MoviePilot<ArrowUpRight size={16} /></button>}
+            {search?.mpSubscribeStatus && <p className="mt-3 text-xs text-primary-600">{search.mpSubscribeStatus.exists ? 'MoviePilot 已有当前季的订阅' : 'MoviePilot 暂无当前季的订阅'}</p>}
+            {search?.mpSubscribeError && <p className="mt-3 break-words text-xs text-red-600">{search.mpSubscribeError}</p>}
+          </section>
+          {search?.mpError && <p role="alert" className="rounded-xl bg-red-50 p-4 text-sm text-red-600">{search.mpError}</p>}
+          {search?.mpLoading ? <div className="flex items-center justify-center gap-2 py-8 text-sm text-gray-500" role="status"><Loader2 size={18} className="animate-spin" />正在搜索站点资源…</div> : search?.mpResults !== undefined && <section className="space-y-4"><div className="flex items-center justify-between"><h3 className="text-sm font-semibold">搜索结果 <span className="ml-1 text-xs font-normal text-gray-400">{allMP.length} 条</span></h3>{totalPages > 1 && <div className="flex items-center gap-2 text-xs text-gray-500"><button onClick={() => setMpPage(p => Math.max(1,p-1))} disabled={currentPage <= 1} className="icon-button !h-8 !w-8" aria-label="上一页"><ChevronLeft size={16} /></button>{currentPage} / {totalPages}<button onClick={() => setMpPage(p => Math.min(totalPages,p+1))} disabled={currentPage >= totalPages} className="icon-button !h-8 !w-8" aria-label="下一页"><ChevronRight size={16} /></button></div>}</div>{matchedMP.length > 0 && <div className="space-y-2"><p className="text-xs font-medium text-primary-600">命中缺集 · {matchedMP.length} 条</p>{matchedMP.map(renderTorrent)}</div>}{unmatchedMP.length > 0 && <details open={!matchedMP.length}><summary className="mb-3 text-xs text-gray-500">其他资源 · {unmatchedMP.length} 条</summary><div className="space-y-2">{unmatchedMP.map(renderTorrent)}</div></details>}{!allMP.length && <div className="empty-state !py-8"><Search size={22} className="mb-3 text-gray-300" /><p className="text-sm text-gray-500">暂未找到资源，可以发送到 MP 订阅继续追踪。</p></div>}</section>}
         </div>
-      )}
+      </Modal>}
     </>
   );
 }
