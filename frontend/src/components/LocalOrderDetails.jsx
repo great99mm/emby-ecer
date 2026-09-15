@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Search, RefreshCw, Download, ExternalLink } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import useStore from '../store';
+import useStore, { isScanBusy } from '../store';
 import { api } from '../api';
 import Modal from './Modal';
 
@@ -10,9 +10,7 @@ export default function LocalOrderDetails({ item }) {
   const report = item.localOrder;
   const navigate = useNavigate();
   const ready = useStore(s => s.settings.ready?.mp);
-  const job = useStore(s => s.jobStatus);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
+  const submitScan = useStore(s => s.startScan);
   const [searchOpen, setSearchOpen] = useState(false);
   const [keyword, setKeyword] = useState(item.name || '');
   const [results, setResults] = useState(null);
@@ -20,13 +18,12 @@ export default function LocalOrderDetails({ item }) {
   const [error, setError] = useState('');
   const [downloads, setDownloads] = useState({});
   const [page, setPage] = useState(1);
-  const busy = job && !['done', 'error'].includes(job.status);
+  const [visibleGaps, setVisibleGaps] = useState(50);
+  const busy = useStore(isScanBusy);
   const gaps = (report?.ranges || []).flatMap(range => range.gaps || []);
   const rescan = async () => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, seriesId: item.id }) });
-      setActiveJobId(data.jobId);
-      setJobStatus({ status: 'running', progress: 0, message: `正在检查《${item.name}》的资源编号` });
+      await submitScan({ seriesId: item.id }, `正在检查《${item.name}》的资源编号`);
       toast.success('已开始单剧检查');
     } catch (err) { toast.error(err.message); }
   };
@@ -58,7 +55,7 @@ export default function LocalOrderDetails({ item }) {
       <p className="mt-1 text-xs leading-6 text-gray-500">{report.filenameNumbers} 个视频从文件名读取编号{report.splitFiles > 0 ? `，其中 ${report.splitFiles} 个标注上 / 中 / 下等分段` : ''}。{report.duplicateSlots > 0 ? `重复编号 ${report.duplicateSlots} 个，已去重。` : ''}{report.scrapedNumberConflicts > 0 ? `${report.scrapedNumberConflicts} 个文件编号与刮削编号不同，采用文件编号。` : ''}</p>
       <div className="mt-3 flex flex-wrap gap-2">{report.ranges.map(range => <span key={range.season} className="pill">S{String(range.season).padStart(2, '0')} · E{range.first}–E{range.last} · 已有 {range.owned} 个编号</span>)}</div>
       <p className="mt-3 text-xs leading-6 text-gray-500">只检查上方范围内的断号；开头、结尾及整季是否缺失，需要该资源版本的完整目录确认。分段视频按各自编号计数。此结果不等于 TMDB 故事缺集数。</p>
-      {gaps.length > 0 && <details className="mt-3" open><summary className="cursor-pointer text-xs font-medium text-amber-700">查看 {gaps.length} 处断号及前后集</summary><div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{gaps.map(gap => <div key={gap.code} className="rounded-lg bg-amber-50 px-3 py-2"><p className="text-xs font-semibold text-amber-800">{gap.code}</p><p className="mt-1 text-xs leading-5 text-gray-500">前：{gap.before}<br />后：{gap.after}</p></div>)}</div></details>}
+      {gaps.length > 0 && <details className="mt-3" open><summary className="cursor-pointer text-xs font-medium text-amber-700">查看 {gaps.length} 处断号及前后集</summary><div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{gaps.slice(0, visibleGaps).map(gap => <div key={gap.code} className="rounded-lg bg-amber-50 px-3 py-2"><p className="text-xs font-semibold text-amber-800">{gap.code}</p><p className="mt-1 text-xs leading-5 text-gray-500">前：{gap.before}<br />后：{gap.after}</p></div>)}{gaps.length > visibleGaps && <button type="button" onClick={() => setVisibleGaps(value => value + 50)} className="btn-ghost !text-xs">继续显示 · 剩余 {gaps.length - visibleGaps} 处</button>}</div></details>}
     </>}
     <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => ready ? setSearchOpen(true) : navigate('/settings')} className="btn-outline !min-h-8 !py-1 !text-xs"><Search size={13} />{ready ? 'MP 按片名搜索' : '连接 MoviePilot'}</button><a className="btn-ghost !min-h-8 !py-1 !text-xs" href={`https://www.themoviedb.org/tv/${item.tmdbId}`} target="_blank" rel="noreferrer"><ExternalLink size={13} />查看 TMDB 目录</a></div>
     {searchOpen && <Modal title={`${item.name} · 查找同版本资源`} description="资源编号尚未对应 TMDB。请核对配音、分段和版本；搜索结果不会标为已命中缺集，也不自动按这些编号订阅。" onClose={() => setSearchOpen(false)}>

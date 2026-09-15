@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { api } from './api';
 
+export const isScanBusy = state => state.scanStarting || !!(state.jobStatus && !['done', 'error'].includes(state.jobStatus.status));
+
 const useStore = create((set, get) => ({
   token: localStorage.getItem('auth_token') || '',
   username: '',
@@ -11,6 +13,24 @@ const useStore = create((set, get) => ({
   seriesSearches: {},
   activeJobId: null,
   jobStatus: null,
+  scanStarting: false,
+
+  startScan: async (options = {}, message = '正在准备扫描…') => {
+    if (isScanBusy(get())) return get().activeJobId;
+    const previous = get().jobStatus;
+    // Give immediate feedback and prevent repeated clicks before the POST returns.
+    set({ scanStarting: true, jobStatus: { status: 'pending', progress: 0, message } });
+    try {
+      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, ...options }) });
+      set({ activeJobId: data.jobId, jobStatus: { id: data.jobId, status: 'pending', progress: 0, message } });
+      return data.jobId;
+    } catch (err) {
+      set({ jobStatus: previous });
+      throw err;
+    } finally {
+      set({ scanStarting: false });
+    }
+  },
 
   setToken: (token) => {
     localStorage.setItem('auth_token', token);

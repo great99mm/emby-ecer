@@ -155,6 +155,8 @@ func loadEpisodeInventoryFromRoute(s settings, route string, onPage func(page, s
 			"IncludeItemTypes": "Episode",
 			"IsMissing":        "false",
 			"Fields":           episodeInventoryFields,
+			"EnableImages":     "false",
+			"EnableUserData":   "false",
 			"SortBy":           "SeriesSortName,ParentIndexNumber,IndexNumber",
 			"StartIndex":       strconv.Itoa(startIndex),
 			"Limit":            strconv.Itoa(pageLimit),
@@ -572,7 +574,7 @@ func handleVerifyScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFromError(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "scan": result})
+	writeScanJSON(w, r, http.StatusOK, map[string]any{"ok": true, "removed": removed, "scan": scanResponse(result, r)})
 }
 
 func verifyMissingEpisodes(s settings) (int, map[string]any, error) {

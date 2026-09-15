@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS scan_jobs (
+  id TEXT PRIMARY KEY,
+  metadata BLOB NOT NULL,
+  result BLOB,
+  updated_at TEXT NOT NULL
+);
 INSERT INTO schema_meta(key, value) VALUES ('version', '1')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 `)
@@ -105,8 +111,9 @@ func (s *sqliteStateStore) ImportJSONFile(key, path string, out any) bool {
 	if s == nil {
 		return false
 	}
-	var existing any
-	if err := s.Load(key, &existing); err == nil {
+	// Migration checks must not decode the existing (potentially huge) value.
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM app_state WHERE key = ?`, key).Scan(&exists); err == nil {
 		return false
 	}
 	raw, err := os.ReadFile(path)

@@ -1,7 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import useStore from '../store';
-import { api } from '../api';
+import useStore, { isScanBusy } from '../store';
 import toast from 'react-hot-toast';
 import { Radar, Clock3, ArrowRight, ArrowUpRight, RefreshCw, Server, BadgeCheck, Download, Film, Check, ListChecks } from 'lucide-react';
 import ProgressBar from '../components/ProgressBar';
@@ -12,26 +11,27 @@ import ConnectionBadge from '../components/ConnectionBadge';
 
 export default function Home() {
   const navigate = useNavigate();
-  const { scan, missing, settings, jobStatus, setActiveJobId, setJobStatus, connectionStatus, checkConnections } = useStore();
+  const scan = useStore(s => s.scan);
+  const missing = useStore(s => s.missing);
+  const settings = useStore(s => s.settings);
+  const connectionStatus = useStore(s => s.connectionStatus);
+  const checkConnections = useStore(s => s.checkConnections);
+  const submitScan = useStore(s => s.startScan);
   const checking = Object.values(connectionStatus).some(item => item.status === 'checking');
-  const [starting, setStarting] = useState(false);
   const summary = scan?.summary || {};
   const scannedAt = scan?.scannedAt;
   const ready = settings.ready || {};
   const scanReady = ready.emby && ready.tmdb;
-  const busy = starting || (jobStatus && !['done','error'].includes(jobStatus.status));
+  const busy = useStore(isScanBusy);
   const groups = useMemo(() => Object.values(missing.reduce((acc, item) => {
     const key = `${item.tmdbId || 0}:${item.officialTitle || item.embyTitle}`;
     if (!acc[key]) acc[key] = { key, title: item.officialTitle || item.embyTitle, poster: item.posterPath, count: 0, codes: [] };
     acc[key].count++; acc[key].codes.push(item.code); return acc;
   }, {})), [missing]);
   const startScan = async (recentOnly = false) => {
-    setStarting(true);
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly }) });
-      setActiveJobId(data.jobId);
-      setJobStatus({ id: data.jobId, status: 'running', progress: 0, message: '准备扫描媒体库' });
-    } catch (err) { toast.error(err.message); } finally { setStarting(false); }
+      await submitScan({ recentOnly });
+    } catch (err) { toast.error(err.message); }
   };
   const title = busy ? '正在核对你的媒体库' : !scanReady ? '好故事，值得一集不落。' : !scannedAt ? '从一次扫描开始。' : missing.length ? `还有 ${missing.length} 集，等待补齐。` : '本次扫描，暂无缺集。';
   return (

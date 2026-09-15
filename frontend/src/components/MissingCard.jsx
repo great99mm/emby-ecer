@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import useStore from '../store';
+import useStore, { isScanBusy } from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
 import { Search, X, RefreshCw, Film, ArrowUpRight, Check, Download, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
@@ -12,6 +12,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [selectedSeason, setSelectedSeason] = useState(null);
+  const [visibleEpisodes, setVisibleEpisodes] = useState(100);
   const [mpPage, setMpPage] = useState(1);
   const [downloads, setDownloads] = useState({});
   const seasonBuckets = {};
@@ -24,14 +25,13 @@ export default function MissingCard({ group, selectable = false, selected = fals
   const searchSeason = selectedSeason != null && seasonBuckets[selectedSeason] ? selectedSeason : Number(seasonKeys[0] || 0);
   const searchEpisodes = seasonBuckets[searchSeason] || [];
   const codeList = (group.items || []).filter(item => item.season === searchSeason).map(item => item.code);
+  const seasonItems = (group.items || []).filter(item => !searchSeason || item.season === searchSeason);
   const seriesKey = `series:${group.tmdbId || group.key}:s${searchSeason}`;
   const search = useStore(s => s.seriesSearches[seriesKey]);
   const setSeriesSearch = useStore(s => s.setSeriesSearch);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
-  const jobStatus = useStore(s => s.jobStatus);
+  const submitScan = useStore(s => s.startScan);
   const mpReady = useStore(s => !!s.settings.ready?.mp);
-  const busy = jobStatus && !['done','error'].includes(jobStatus.status);
+  const busy = useStore(isScanBusy);
   const totalEps = group.totalEpisodes || 0;
   const ownedEps = group.ownedEpisodes || 0;
   const healthPct = totalEps > 0 ? Math.min(100, Math.round(ownedEps / totalEps * 100)) : 0;
@@ -44,9 +44,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
       return;
     }
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, seriesId: group.embySeriesId }) });
-      setActiveJobId(data.jobId);
-      setJobStatus({ status: 'running', progress: 0, message: `正在重新扫描《${group.title}》...`, current: group.title });
+      await submitScan({ seriesId: group.embySeriesId }, `正在重新扫描《${group.title}》…`);
       toast.success('已开始单剧扫描');
     } catch (err) {
       toast.error(err.message);
@@ -224,7 +222,7 @@ export default function MissingCard({ group, selectable = false, selected = fals
       {open && <Modal title={group.title} description={`缺 ${missingEps} 集${totalEps ? ` · 已有 ${ownedEps} / ${totalEps} 集` : ''}`} onClose={() => setOpen(false)}>
         <div className="space-y-6">
           <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><span className="pill">TMDB {group.tmdbId || '未匹配'}</span><span className="pill-amber">待补齐 {missingEps} 集</span></div><button onClick={rescanSeries} disabled={busy || !group.embySeriesId} className="btn-ghost !min-h-8 !py-1 !text-xs"><RefreshCw size={14} />单剧重扫</button></div>
-          <section><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-sm font-medium">缺失集号</h3>{seasonKeys.length > 0 && <select aria-label="选择搜索季" value={searchSeason} onChange={e => { setSelectedSeason(Number(e.target.value)); setMpPage(1); }} className="field !min-h-9 !w-auto !py-1.5 !text-xs">{[...seasonKeys].sort((a,b) => Number(a)-Number(b)).map(key => <option key={key} value={key}>第 {key} 季 · 缺 {seasonBuckets[key].length} 集</option>)}</select>}</div><div className="flex flex-wrap gap-2">{(group.items || []).filter(item => !searchSeason || item.season === searchSeason).map(item => <span key={item.id || item.code} className="inline-flex items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800">{item.code}<button onClick={() => ignoreEpisode(item)} aria-label={`忽略 ${item.code}`} className="ml-1 rounded p-0.5 text-amber-500 hover:bg-amber-100 hover:text-amber-800"><X size={12} /></button></span>)}</div></section>
+          <section><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-sm font-medium">缺失集号</h3>{seasonKeys.length > 0 && <select aria-label="选择搜索季" value={searchSeason} onChange={e => { setSelectedSeason(Number(e.target.value)); setMpPage(1); setVisibleEpisodes(100); }} className="field !min-h-9 !w-auto !py-1.5 !text-xs">{[...seasonKeys].sort((a,b) => Number(a)-Number(b)).map(key => <option key={key} value={key}>第 {key} 季 · 缺 {seasonBuckets[key].length} 集</option>)}</select>}</div><div className="flex flex-wrap gap-2">{seasonItems.slice(0, visibleEpisodes).map(item => <span key={item.id || item.code} className="inline-flex items-center gap-1 rounded-lg border border-amber-100 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800">{item.code}<button onClick={() => ignoreEpisode(item)} aria-label={`忽略 ${item.code}`} className="ml-1 rounded p-0.5 text-amber-500 hover:bg-amber-100 hover:text-amber-800"><X size={12} /></button></span>)}</div>{seasonItems.length > visibleEpisodes && <button type="button" onClick={() => setVisibleEpisodes(value => value + 100)} className="btn-ghost mt-3 !text-xs">继续显示集号 · 剩余 {seasonItems.length - visibleEpisodes} 集</button>}</section>
           <section className="rounded-2xl border border-gray-200 p-4 sm:p-5">
             <div className="mb-4"><h3 className="text-sm font-semibold">通过 MoviePilot 补齐</h3><p className="mt-1 text-xs leading-6 text-gray-500">{searchSeason ? `搜索第 ${searchSeason} 季，优先展示命中缺集的资源。` : '搜索资源，或将剧集交给 MoviePilot 持续追踪。'}</p></div>
             {mpReady ? <div className="flex flex-wrap gap-2"><button onClick={doMPSearch} disabled={!!search?.mpLoading} className="btn-primary"><Search size={16} />{search?.mpLoading ? '搜索中…' : '搜索资源'}</button><button onClick={doMPSubscribe} disabled={!group.tmdbId || !!search?.mpSubscribeSending} className="btn-outline">{search?.mpSubscribeSending ? '发送中…' : '发送到 MP 订阅'}</button><button onClick={loadMPSubscribeStatus} disabled={!group.tmdbId || !!search?.mpSubscribeLoading} className="btn-ghost">{search?.mpSubscribeLoading ? '查询中…' : '查询订阅'}</button></div> : <button onClick={() => { setOpen(false); navigate('/settings'); }} className="btn-primary">连接 MoviePilot<ArrowUpRight size={16} /></button>}

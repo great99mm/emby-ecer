@@ -56,23 +56,27 @@ const (
 )
 
 type job struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Status    jobStatus `json:"status"`
-	Progress  int       `json:"progress"`
-	Message   string    `json:"message"`
-	Current   string    `json:"current,omitempty"`
-	Result    any       `json:"result,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID           string    `json:"id"`
+	Type         string    `json:"type"`
+	Targeted     bool      `json:"targeted,omitempty"`
+	Status       jobStatus `json:"status"`
+	Progress     int       `json:"progress"`
+	Message      string    `json:"message"`
+	Current      string    `json:"current,omitempty"`
+	Result       any       `json:"result,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	resultStored bool
 }
 
 type jobManager struct {
 	mu          sync.RWMutex
+	persistMu   sync.Mutex
 	path        string
 	jobs        map[string]*job
 	lastPersist time.Time
+	savedAt     map[string]time.Time
 }
 
 type persistedJobState struct {
@@ -80,12 +84,21 @@ type persistedJobState struct {
 }
 
 func newJobManager(path string) *jobManager {
-	m := &jobManager{path: path, jobs: map[string]*job{}}
+	m := &jobManager{path: path, jobs: map[string]*job{}, savedAt: map[string]time.Time{}}
 	var state persistedJobState
 	if stateDB != nil {
-		stateDB.ImportJSONFile("jobs", path, &state)
+		state, _ = stateDB.loadJobs()
+		for id, item := range state.Jobs {
+			m.savedAt[id] = item.UpdatedAt
+		}
+		if len(state.Jobs) == 0 {
+			stateDB.ImportJSONFile("jobs", path, &state)
+		}
 	}
-	if err := loadStateJSON("jobs", path, &state); err == nil {
+	if len(state.Jobs) == 0 {
+		_ = loadStateJSON("jobs", path, &state)
+	}
+	if len(state.Jobs) > 0 {
 		for id, item := range state.Jobs {
 			if item == nil || item.Type != "scan" || strings.TrimSpace(id) == "" {
 				continue
@@ -102,22 +115,36 @@ func newJobManager(path string) *jobManager {
 		}
 	}
 	m.cleanupLocked()
-	_ = m.persistLocked()
+	_ = m.persist()
 	return m
 }
 
 func (m *jobManager) create(typ string) *job {
+	j := m.register(typ)
+	_ = m.persist()
+	return j
+}
+
+func (m *jobManager) register(typ string) *job {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	id := randomID(12)
 	j := &job{ID: id, Type: typ, Status: jobPending, Progress: 0, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	m.jobs[id] = j
 	m.cleanupLocked()
-	_ = m.persistLocked()
-	return cloneJob(j)
+	created := cloneJob(j)
+	m.mu.Unlock()
+	return created
 }
 
 func (m *jobManager) get(id string) *job {
+	j := m.getSummary(id)
+	if j != nil && j.Result == nil && j.resultStored && stateDB != nil {
+		j.Result, _ = stateDB.loadJobResult(id)
+	}
+	return j
+}
+
+func (m *jobManager) getSummary(id string) *job {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if j, ok := m.jobs[id]; ok {
@@ -128,7 +155,7 @@ func (m *jobManager) get(id string) *job {
 
 func (m *jobManager) update(id string, fn func(*job)) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	persist := false
 	if j, ok := m.jobs[id]; ok {
 		fn(j)
 		j.UpdatedAt = time.Now()
@@ -136,15 +163,48 @@ func (m *jobManager) update(id string, fn func(*job)) {
 		// Keep progress in memory; checkpoint large partial results at most every
 		// 30 seconds. Completion and errors must still be durable immediately.
 		if j.Status == jobDone || j.Status == jobError || time.Since(m.lastPersist) >= 30*time.Second {
-			_ = m.persistLocked()
+			persist = true
 		}
+	}
+	m.mu.Unlock()
+	if persist {
+		_ = m.persist()
 	}
 }
 
 func (m *jobManager) persist() error {
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.persistLocked()
+	state := persistedJobState{Jobs: map[string]*job{}}
+	for id, item := range m.jobs {
+		if item != nil {
+			state.Jobs[id] = cloneJob(item)
+		}
+	}
+	m.lastPersist = time.Now()
+	m.mu.Unlock()
+	// Encoding and database writes can be slow; status readers must stay free.
+	if strings.TrimSpace(m.path) == "" {
+		return nil
+	}
+	if stateDB != nil {
+		if err := stateDB.saveJobs(state, m.savedAt); err != nil {
+			return err
+		}
+		// Completed results remain on disk and load on demand. Keeping every
+		// recent full-library result in memory makes repeated rescans grow RAM.
+		m.mu.Lock()
+		for id, saved := range state.Jobs {
+			if current := m.jobs[id]; current != nil && current.UpdatedAt.Equal(saved.UpdatedAt) && saved.Result != nil && (saved.Status == jobDone || saved.Status == jobError) {
+				current.resultStored = true
+				current.Result = nil
+			}
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	return saveStateJSON("jobs", m.path, state)
 }
 
 func (m *jobManager) cleanupLocked() {
@@ -153,24 +213,6 @@ func (m *jobManager) cleanupLocked() {
 			delete(m.jobs, k)
 		}
 	}
-}
-
-func (m *jobManager) persistLocked() error {
-	if m == nil || strings.TrimSpace(m.path) == "" {
-		return nil
-	}
-	state := persistedJobState{Jobs: map[string]*job{}}
-	for id, item := range m.jobs {
-		if item == nil {
-			continue
-		}
-		state.Jobs[id] = cloneJob(item)
-	}
-	if err := saveStateJSON("jobs", m.path, state); err != nil {
-		return err
-	}
-	m.lastPersist = time.Now()
-	return nil
 }
 
 func cloneJob(in *job) *job {
@@ -393,7 +435,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request, user string) {
 			writeJSON(w, http.StatusOK, map[string]any{"scannedAt": "", "summary": map[string]any{}, "missing": []any{}, "unmatched": map[string]any{}})
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeScanJSON(w, r, http.StatusOK, scanResponse(result, r))
 
 	case r.URL.Path == "/api/scan" && r.Method == http.MethodPost:
 		var body struct {
@@ -940,7 +982,13 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	onlySeriesIDs := parseSeriesIDSet(onlySeriesID)
 	fullSeriesScan := maxSeries <= 0 && len(onlySeriesIDs) == 0
 
-	allItems, err := loadLibraryItems(s)
+	var allItems []embyItem
+	var err error
+	if len(onlySeriesIDs) > 0 {
+		allItems, err = loadSelectedLibraryItems(s, onlySeriesIDs)
+	} else {
+		allItems, err = loadLibraryItems(s)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1140,7 +1188,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 	// 一次性拉全库单集，替代逐剧请求；只有一两部剧要扫时，逐剧读取更划算
 	inventory := map[string]*seriesInventory{}
 	useInventory := false
-	if pendingSeriesCount > 1 && pendingSeriesCount*4 >= seriesTotal {
+	if len(onlySeriesIDs) == 0 && pendingSeriesCount > 1 && pendingSeriesCount*4 >= seriesTotal {
 		advanceProgress(0, "正在拉取全库单集缓存...", "初始化")
 		loaded, invErr := loadEpisodeInventory(s, func(page, seriesCount int) {
 			advanceProgress(0, fmt.Sprintf("正在拉取全库单集缓存（第 %d 页 / 已覆盖 %d 部剧）...", page, seriesCount), "初始化")
@@ -1582,11 +1630,12 @@ func startScanJob() (*job, bool) {
 	scanStartMu.Lock()
 	defer scanStartMu.Unlock()
 	if id := currentActiveScanJobID(); id != "" {
-		if j := jobMgr.get(id); j != nil && (j.Status == jobPending || j.Status == jobRunning) {
+		if j := jobMgr.getSummary(id); j != nil && (j.Status == jobPending || j.Status == jobRunning) {
 			return j, false
 		}
 	}
-	j := jobMgr.create("scan")
+	// Persist in the worker so clicking Scan never waits for a large checkpoint.
+	j := jobMgr.register("scan")
 	activateScanJob(j.ID)
 	return j, true
 }
@@ -1598,12 +1647,15 @@ func handleGetJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少任务 ID"})
 		return
 	}
-	j := jobMgr.get(id)
+	j := jobMgr.getSummary(id)
+	if r.URL.Query().Get("summary") != "1" {
+		j = jobMgr.get(id)
+	}
 	if j == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "任务不存在或已过期"})
 		return
 	}
-	writeJSON(w, http.StatusOK, jobResponse(j, r))
+	writeScanJSON(w, r, http.StatusOK, jobResponse(j, r))
 }
 
 func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
@@ -1612,14 +1664,17 @@ func handleGetActiveJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
 		return
 	}
-	j := jobMgr.get(id)
+	j := jobMgr.getSummary(id)
+	if r.URL.Query().Get("summary") != "1" {
+		j = jobMgr.get(id)
+	}
 	if j == nil {
 		// 任务可能还在初始化中，不要误清活跃标记
 		writeJSON(w, http.StatusOK, map[string]any{"job": nil})
 		return
 	}
 	// 返回任务本身，即使已完成/出错也返回，让前端自行决定展示
-	writeJSON(w, http.StatusOK, map[string]any{"job": jobResponse(j, r)})
+	writeScanJSON(w, r, http.StatusOK, map[string]any{"job": jobResponse(j, r)})
 }
 
 // Normal polling only needs progress. Full results remain available explicitly.
@@ -1627,6 +1682,13 @@ func jobResponse(j *job, r *http.Request) *job {
 	if j != nil && r.URL.Query().Get("summary") == "1" {
 		j = cloneJob(j)
 		j.Result = nil
+	} else if j != nil && r.URL.Query().Get("view") == "compact" {
+		if result, ok := j.Result.(map[string]any); ok {
+			if scan, ok := result["scan"].(map[string]any); ok {
+				j = cloneJob(j)
+				j.Result = map[string]any{"scan": scanResponse(scan, r)}
+			}
+		}
 	}
 	return j
 }
@@ -1719,7 +1781,10 @@ func runJob(id string, s settings, airedOnly bool, maxSeries int, recentOnly boo
 		jobMgr.update(id, fn)
 		return true
 	}
-	changedSince := lastScanTime()
+	var changedSince time.Time
+	if recentOnly && strings.TrimSpace(seriesID) == "" {
+		changedSince = lastScanTime()
+	}
 	modeText := "全量增量模式"
 	if recentOnly {
 		modeText = "最近变更模式"
@@ -1728,11 +1793,20 @@ func runJob(id string, s settings, airedOnly bool, maxSeries int, recentOnly boo
 		}
 	}
 	update(func(j *job) {
+		j.Targeted = strings.TrimSpace(seriesID) != ""
 		j.Status = jobRunning
 		j.Progress = 1
 		j.Message = "开始扫描媒体库..."
 		j.Current = modeText
 	})
+	if err := jobMgr.persist(); err != nil {
+		update(func(j *job) {
+			j.Status = jobError
+			j.Error = "保存扫描任务失败"
+			j.Message = "无法启动扫描"
+		})
+		return
+	}
 	scanProgressMax := 99
 
 	result, err := scanLibrary(s, airedOnly, maxSeries, recentOnly, changedSince, seriesID, func(processed, total int, detail, current string, snapshot map[string]any) {
@@ -1769,7 +1843,14 @@ func runJob(id string, s settings, airedOnly bool, maxSeries int, recentOnly boo
 	if strings.TrimSpace(seriesID) != "" {
 		result = mergeSelectedSeriesScanResult(selectedResultIDs(parseSeriesIDSet(seriesID), result), result)
 	}
-	_ = saveScanResult(result)
+	if err := saveScanResult(result); err != nil {
+		update(func(j *job) {
+			j.Status = jobError
+			j.Error = "保存扫描结果失败"
+			j.Message = "扫描完成，但结果保存失败"
+		})
+		return
+	}
 	missingCount := 0
 	switch items := result["missing"].(type) {
 	case []missingEpisode:
@@ -1839,7 +1920,9 @@ func loadLibraryItemsFromRoute(s settings, itemRoute string) ([]embyItem, error)
 		if err := embyGet(s, itemRoute, map[string]string{
 			"Recursive":        "true",
 			"IncludeItemTypes": "Series,Movie",
-			"Fields":           "ProviderIds,SortName,OriginalTitle,PremiereDate,ProductionYear,DateLastSaved,DateLastMediaAdded,RecursiveItemCount,Path",
+			"Fields":           libraryItemFields,
+			"EnableImages":     "false",
+			"EnableUserData":   "false",
 			"SortBy":           "SortName",
 			"StartIndex":       strconv.Itoa(itemStart),
 			"Limit":            strconv.Itoa(itemPageLimit),

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import Modal from '../components/Modal';
 import ScanDiagnostics from '../components/ScanDiagnostics';
-import useStore from '../store';
+import useStore, { isScanBusy } from '../store';
 import { api } from '../api';
 import toast from 'react-hot-toast';
 import { Radar, Search, Library, ArrowRight, RefreshCw, CheckSquare, ShieldCheck, ScanLine, Check } from 'lucide-react';
@@ -20,11 +20,9 @@ export default function Missing() {
   const scanReady = ready.emby && ready.tmdb;
   const missing = useStore(s => s.missing);
   const scan = useStore(s => s.scan);
-  const jobStatus = useStore(s => s.jobStatus);
-  const setActiveJobId = useStore(s => s.setActiveJobId);
-  const setJobStatus = useStore(s => s.setJobStatus);
+  const submitScan = useStore(s => s.startScan);
   const setScan = useStore(s => s.setScan);
-  const busy = jobStatus && jobStatus.status !== 'done' && jobStatus.status !== 'error';
+  const busy = useStore(isScanBusy);
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState({});
   const [exemptions, setExemptions] = useState({ manual: [], complete: [] });
@@ -79,9 +77,7 @@ export default function Missing() {
 
   const startScan = async (recentOnly = false) => {
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, recentOnly }) });
-      setActiveJobId(data.jobId);
-      setJobStatus({ status: 'running', progress: 0, message: '任务已提交...' });
+      await submitScan({ recentOnly });
     } catch (err) {
       toast.error(err.message);
     }
@@ -160,9 +156,7 @@ export default function Missing() {
     const ids = selectedGroups.map(g => g.embySeriesId).filter(Boolean);
     if (!ids.length) return toast.error('请先选择剧集');
     try {
-      const data = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ type: 'scan', airedOnly: true, seriesIds: ids }) });
-      setActiveJobId(data.jobId);
-      setJobStatus({ status: 'running', progress: 0, message: `正在单独扫描 ${ids.length} 部剧...` });
+      await submitScan({ seriesIds: ids }, `正在单独扫描 ${ids.length} 部剧…`);
       setSelectMode(false);
       setSelected({});
     } catch (err) {
