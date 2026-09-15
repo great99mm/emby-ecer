@@ -122,8 +122,8 @@ func TestAbsoluteNumberingNeedsReviewAndSurvivesIncrementalScan(t *testing.T) {
 	if entry, ok := seriesScanCache.Get("s1"); ok && entry.Complete {
 		t.Fatal("uncertain numbering was archived as complete")
 	}
-	if seasonCalls != 0 {
-		t.Fatal("ambiguous numbering should be recognized before unnecessary season requests")
+	if seasonCalls != 1 {
+		t.Fatal("only the suspicious season should be checked against TMDB's actual numbering")
 	}
 	if err = saveScanResult(result); err != nil {
 		t.Fatal(err)

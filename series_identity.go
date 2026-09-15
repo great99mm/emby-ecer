@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// Emby can expose one logical show as several Series IDs while /Shows/{id}/
-// Episodes presents all versions. The bulk inventory is partitioned by the
-// physical Series ID, so compatible copies must share their owned episodes.
+// Emby can expose one logical show as several Series IDs. Both bulk inventory
+// and /Shows/{id}/Episodes may contain only a physical copy, so compatible
+// copies must explicitly share their owned episodes.
 func seriesIdentityGroups(items []embyItem, excluded map[string]bool) map[int][]embyItem {
 	groups := map[int][]embyItem{}
 	for _, item := range items {

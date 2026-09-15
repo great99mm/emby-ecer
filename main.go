@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	seriesScanCacheVersion = "library-identity-ended-v3"
+	seriesScanCacheVersion = "library-identity-numbering-v4"
 )
 
 // tmdbBaseURL 是变量而非常量，便于测试指向本地 mock
@@ -887,9 +887,10 @@ type tmdbTVDetail struct {
 }
 
 type tmdbSeason struct {
-	SeasonNumber int    `json:"season_number"`
-	EpisodeCount int    `json:"episode_count"`
-	PosterPath   string `json:"poster_path"`
+	SeasonNumber   int    `json:"season_number"`
+	EpisodeCount   int    `json:"episode_count"`
+	PosterPath     string `json:"poster_path"`
+	EpisodeNumbers []int  `json:"-"`
 }
 
 type tmdbSeasonDetail struct {
@@ -1214,6 +1215,25 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 		mu.Unlock()
 	}
 	seriesWorkers := clampScanConcurrency(s.ScanConcurrency)
+	var episodeLoads, seasonLoads sync.Map
+	loadEpisodes := func(id string) ([]embyEpisode, error) {
+		load, _ := episodeLoads.LoadOrStore(id, sync.OnceValues(func() ([]embyEpisode, error) {
+			episodes, err := loadSeriesEpisodes(s, id, func(page, count int) {
+				adjustTotal(1)
+				advanceProgress(1, "正在读取剧集及同剧版本", "读取 Emby 集数")
+			})
+			return excludeSeriesEpisodes(episodes, excludedItems), err
+		}))
+		return load.(func() ([]embyEpisode, error))()
+	}
+	loadSeason := func(id, season int) (tmdbSeasonDetail, error) {
+		load, _ := seasonLoads.LoadOrStore([2]int{id, season}, sync.OnceValues(func() (tmdbSeasonDetail, error) {
+			var detail tmdbSeasonDetail
+			err := tmdbGet(s, fmt.Sprintf("/tv/%d/season/%d", id, season), map[string]string{"language": "zh-CN"}, &detail)
+			return detail, err
+		}))
+		return load.(func() (tmdbSeasonDetail, error))()
+	}
 
 	parallelFor(seriesItems, seriesWorkers, func(series embyItem) {
 		title := fallback(series.Name, "未知剧集")
@@ -1275,11 +1295,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
 		} else {
 			var err error
-			seriesEpisodes, err = loadSeriesEpisodes(s, series.ID, func(page, count int) {
-				adjustTotal(1)
-				advanceProgress(1, fmt.Sprintf("正在读取《%s》的 Emby 剧集", title), title)
-			})
-			seriesEpisodes = excludeSeriesEpisodes(seriesEpisodes, excludedItems)
+			seriesEpisodes, err = loadEpisodes(series.ID)
 			if err != nil {
 				unmatched := simpleMedia(series, "读取 Emby 单剧集数失败："+err.Error())
 				mu.Lock()
@@ -1289,7 +1305,7 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				advanceProgress(2, fmt.Sprintf("读取《%s》剧集失败", title), title)
 				return
 			}
-			inv = buildSeriesInventory(seriesEpisodes)
+			inv = inventoryForSeries(seriesEpisodes, series.ID, identityGroups[resolved])
 			advanceProgress(1, fmt.Sprintf("已读取《%s》的 Emby 集数", title), title)
 		}
 		embySeasons := inv.Seasons
@@ -1303,13 +1319,60 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			return
 		}
 		advanceProgress(1, fmt.Sprintf("开始比对《%s》的季集信息", title), title)
-		if total, reason := numberingReview(inv, tv); reason != "" {
+		group := identityGroups[resolved]
+		sources := map[string]*seriesInventory{series.ID: inv}
+		for _, item := range group {
+			if item.ID == series.ID {
+				continue
+			}
+			if useInventory {
+				sources[item.ID] = inventory[item.ID]
+			} else {
+				episodes, err := loadEpisodes(item.ID)
+				if err != nil {
+					mu.Lock()
+					unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取同剧版本失败："+err.Error()))
+					mu.Unlock()
+					return
+				}
+				sources[item.ID] = inventoryForSeries(episodes, item.ID, group)
+			}
+		}
+		// Large episode numbers may be TMDB's own absolute numbering. Validate
+		// those seasons before excluding a copy from the merged inventory.
+		for _, season := range tv.Seasons {
+			if season.SeasonNumber <= 0 || season.EpisodeCount <= 0 {
+				continue
+			}
+			for _, source := range sources {
+				if source == nil || source.SeasonMax[season.SeasonNumber] <= season.EpisodeCount {
+					continue
+				}
+				detail, err := loadSeason(resolved, season.SeasonNumber)
+				if err != nil {
+					mu.Lock()
+					unmatchedSeries = append(unmatchedSeries, simpleMedia(series, "读取 TMDB 季集编号失败："+err.Error()))
+					mu.Unlock()
+					return
+				}
+				setSeasonEpisodeNumbers(&tv, season.SeasonNumber, detail)
+				break
+			}
+		}
+		for id, source := range sources {
+			sources[id] = normalizeInventoryNumbering(source, tv)
+		}
+		inv = sources[series.ID]
+		reviewNumbering := func() bool {
+			total, reason := numberingReview(inv, tv)
+			if reason == "" {
+				return false
+			}
 			// Load original filenames only for incompatible orders. The fast full
 			// inventory remains small, and source URLs never enter saved results.
 			var localOrder *localOrderReport
 			if useInventory {
-				seriesEpisodes, err = loadSeriesEpisodes(s, series.ID, nil)
-				seriesEpisodes = excludeSeriesEpisodes(seriesEpisodes, excludedItems)
+				seriesEpisodes, err = loadEpisodes(series.ID)
 			}
 			if err == nil {
 				localOrder = inspectLocalOrder(seriesEpisodes)
@@ -1326,20 +1389,15 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 			})
 			mu.Unlock()
 			seriesScanCache.Delete(series.ID)
+			return true
+		}
+		if reviewNumbering() {
 			return
 		}
-		group := identityGroups[resolved]
 		sourceIDs := []string{series.ID}
-		if useInventory && len(group) > 1 {
-			inv, sourceIDs = mergedIdentityInventory(inv, series.ID, group, inventory, tv)
+		if len(group) > 1 {
+			inv, sourceIDs = mergedIdentityInventory(inv, series.ID, group, sources, tv)
 			embySeasons = inv.Seasons
-		} else if len(group) > 1 {
-			// Emby already returns its merged logical show through /Shows/id/Episodes.
-			for _, item := range group {
-				if item.ID != series.ID {
-					sourceIDs = append(sourceIDs, item.ID)
-				}
-			}
 		}
 		// Missing episodes are shared across compatible copies of a show, so an
 		// ignore on any contributing copy must apply to the same logical episode.
@@ -1362,17 +1420,22 @@ func scanLibrary(s settings, airedOnly bool, maxSeries int, recentOnly bool, cha
 				continue
 			}
 			// Only skip details when every expected episode number is present.
-			if inv.coversSeason(season.SeasonNumber, season.EpisodeCount) {
+			if inv.SeasonMax[season.SeasonNumber] <= season.EpisodeCount && inv.coversSeason(season.SeasonNumber, season.EpisodeCount) {
 				totalTMDBCount += season.EpisodeCount
 				ownedCount += season.EpisodeCount
 				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季已完整，跳过 TMDB 比对", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 				continue
 			}
-			var seasonDetail tmdbSeasonDetail
-			if err := tmdbGet(s, fmt.Sprintf("/tv/%d/season/%d", resolved, season.SeasonNumber), map[string]string{"language": "zh-CN"}, &seasonDetail); err != nil {
+			seasonDetail, err := loadSeason(resolved, season.SeasonNumber)
+			if err != nil {
 				cacheable = false
 				advanceProgress(1, fmt.Sprintf("《%s》第 %d 季读取失败，跳过", officialTitle, season.SeasonNumber), fmt.Sprintf("%s / 第%d季", officialTitle, season.SeasonNumber))
 				continue
+			}
+			setSeasonEpisodeNumbers(&tv, season.SeasonNumber, seasonDetail)
+			inv = normalizeInventoryNumbering(inv, tv)
+			if reviewNumbering() {
+				return
 			}
 			// 跳过“幽灵季”：Emby 中没有该季，且 TMDB 该季也没有任何已播出集数
 			if airedOnly && !embySeasons[season.SeasonNumber] {

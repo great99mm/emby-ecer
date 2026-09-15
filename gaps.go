@@ -101,11 +101,18 @@ func (inv *seriesInventory) coversSeason(season, count int) bool {
 
 func numberingReview(inv *seriesInventory, tv tmdbTVDetail) (int, string) {
 	counts := map[int]int{}
+	numbers := map[int]map[int]bool{}
 	total := 0
 	for _, season := range tv.Seasons {
 		if season.SeasonNumber > 0 && season.EpisodeCount > 0 {
 			counts[season.SeasonNumber] = season.EpisodeCount
 			total += season.EpisodeCount
+			if season.EpisodeNumbers != nil {
+				numbers[season.SeasonNumber] = map[int]bool{}
+				for _, number := range season.EpisodeNumbers {
+					numbers[season.SeasonNumber][number] = true
+				}
+			}
 		}
 	}
 	seasons := make([]int, 0, len(inv.Seasons))
@@ -114,7 +121,18 @@ func numberingReview(inv *seriesInventory, tv tmdbTVDetail) (int, string) {
 	}
 	sort.Ints(seasons)
 	for _, season := range seasons {
-		if inv.SeasonMax[season] > counts[season] {
+		mismatch := inv.SeasonMax[season] > counts[season]
+		if actual, ok := numbers[season]; ok {
+			mismatch = false
+			prefix := strconv.Itoa(season) + ":"
+			for key := range inv.Owned {
+				if strings.HasPrefix(key, prefix) && !actual[parseInt(strings.TrimPrefix(key, prefix))] {
+					mismatch = true
+					break
+				}
+			}
+		}
+		if mismatch {
 			return total, fmt.Sprintf("编号待确认：Emby 有 %d 集、%d 季，第 %d 季集号到 %d；TMDB 有 %d 集、%d 季，第 %d 季记录 %d 集。季集编号不能直接对应，暂不计算缺集。", inv.Total, len(inv.Seasons), season, inv.SeasonMax[season], total, len(counts), season, counts[season])
 		}
 	}
